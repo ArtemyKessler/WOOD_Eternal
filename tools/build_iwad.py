@@ -2,19 +2,18 @@
 """Собирает урезанный IWAD wood.wad из freedoom2.wad.
 
 Что делает:
-  * оставляет одну карту (KEEP_MAP), остальные выкидывает;
+  * выкидывает все карты Freedoom и вставляет наши из map-WAD (wad с MAP01 от gen_forest.py);
   * выкидывает музыку, кроме KEEP_MUSIC, и демо-записи;
   * выкидывает спрайты монстров/предметов из DROP_SPRITES;
   * добавляет лампы из каталога wad/lumps/ (WOODCFG и т.п.), заменяя одноимённые.
 
-Использование: build_iwad.py <freedoom2.wad> <wad/lumps> <out/wood.wad>
+Использование: build_iwad.py <freedoom2.wad> <wad/lumps> <map01.wad> <out/wood.wad>
 """
 import os
 import re
 import struct
 import sys
 
-KEEP_MAP = "MAP01"
 KEEP_MUSIC = {"D_RUNNIN"}
 # Монстры, которых в WOOD точно не будет (на этапе спайка — грубо, уточним по дизайну).
 DROP_SPRITES = {
@@ -65,9 +64,8 @@ def strip(lumps):
     skipping_map = False
     for name, data in lumps:
         if re.fullmatch(r"MAP\d\d", name):
-            skipping_map = name != KEEP_MAP
-            if skipping_map:
-                continue
+            skipping_map = True
+            continue
         elif skipping_map and name in MAP_LUMPS:
             continue
         else:
@@ -98,11 +96,12 @@ def add_custom(lumps, lumps_dir):
 
 
 def main():
-    src, lumps_dir, dst = sys.argv[1:4]
+    src, lumps_dir, map_wad, dst = sys.argv[1:5]
     ident, lumps = read_wad(src)
     if ident != b"IWAD":
         sys.exit(f"{src}: not an IWAD")
-    stripped = add_custom(strip(lumps), lumps_dir)
+    _, maps = read_wad(map_wad)
+    stripped = add_custom(strip(lumps), lumps_dir) + maps
     size = write_wad(dst, ident, stripped)
     print(f"wood.wad: {len(lumps)} -> {len(stripped)} lumps, "
           f"{os.path.getsize(src) / 1e6:.1f} MB -> {size / 1e6:.1f} MB")
