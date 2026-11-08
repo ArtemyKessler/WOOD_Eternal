@@ -2,3 +2,4 @@
 /dist/
 /engine/build/
 /engine/wasm/fs/*.wad
+__pycache__/
