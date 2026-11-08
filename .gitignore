@@ -1,0 +1,4 @@
+/build/
+/dist/
+/engine/build/
+/engine/wasm/fs/*.wad
