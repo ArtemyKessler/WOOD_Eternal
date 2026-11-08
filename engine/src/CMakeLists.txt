@@ -113,6 +113,8 @@ set(COMMON_SRC
     p_switch.c
     p_telept.c
     p_tick.c
+    wood_director.c
+    wood_director.h
     p_tick.h
     p_user.c
     p_user.h
