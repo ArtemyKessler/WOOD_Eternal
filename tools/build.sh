@@ -21,8 +21,9 @@ fi
 echo "$FREEDOOM_SHA256  $FD_ZIP" | sha256sum -c -
 unzip -o -q -j "$FD_ZIP" "freedoom-$FREEDOOM_VER/freedoom2.wad" -d "$CACHE"
 
-# 2. Урезанный IWAD.
-python3 -I "$ROOT/tools/build_iwad.py" "$CACHE/freedoom2.wad" "$ROOT/wad/lumps" "$CACHE/wood.wad"
+# 2. Карта (генерируется скриптом, ноды строит наш nodebuild.py) и урезанный IWAD.
+python3 "$ROOT/tools/mapgen/gen_forest.py" "$CACHE/map01.wad"
+python3 -I "$ROOT/tools/build_iwad.py" "$CACHE/freedoom2.wad" "$ROOT/wad/lumps" "$CACHE/map01.wad" "$CACHE/wood.wad"
 
 # 3. prboomx.wad — служебный WAD движка, собирается нативной сборкой.
 if [ ! -f "$CACHE/prboomx.wad" ]; then
