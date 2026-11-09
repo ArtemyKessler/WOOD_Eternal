@@ -45,7 +45,8 @@ KEEP_SPRITES = {
 # Текстуры и флэты, нужные движку помимо карты.
 KEEP_TEXTURES = {"AASHITTY", "SKY1"}  # первая текстура — «нулевая», SKY1 — небо MAP01
 SKY_ALIASES = ("SKY2", "SKY3")       # движок ищет их по имени; делаем копиями SKY1
-KEEP_FLATS = {"F_SKY1", "GRNROCK", "FLOOR7_2"}  # небо и фон рамки экрана
+KEEP_FLATS = {"F_SKY1", "GRNROCK", "FLOOR7_2",  # небо и фон рамки экрана
+              "GRASS1"}  # фон меню настроек (WOOD_MENU_FLAT в m_menu.c)
 
 # Звуки выкинутых монстров (DS-префикс).
 DROP_SOUNDS = {
