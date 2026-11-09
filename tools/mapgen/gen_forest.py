@@ -50,7 +50,7 @@ POND_BANK, POND_FLOOR, POND_DEPTH = "A-MUD", "FWATER1", 8   # мелко: гла
 THING_PLAYER1 = 1
 THING_TREE_BIG = 54      # TRE2, большое дерево (радиус 32)
 THING_TREE_BURNT = 43    # TRE1, обгоревшее дерево (радиус 16)
-THING_STUMP = 47         # SMIT, пень (радиус 16)
+THING_STUMP = 47         # SMIT: в Doom пень, во Freedoom маленькое деревце (радиус 16)
 # декор из make_decor.py (подменяет неиспользуемые декорации Doom II)
 THING_BOULDER = 30       # COL1, валун (твёрдый)
 THING_STONE = 31         # COL2, камень (твёрдый)
@@ -64,6 +64,11 @@ SOLID_THINGS = {THING_TREE_BIG, THING_TREE_BURNT, THING_STUMP, THING_BOULDER, TH
 SKILL_ALL = 0x0007
 
 PATH_HALF_WIDTH = 128
+
+# Плотность леса. Деревья можно спилить бензопилой — см. saw_trees в WOODCFG.
+CLEARING_TREES = 16      # отдельных деревьев внутри поляны
+EDGE_ROW2_STEP = 176     # второй ряд опушки на полянах: шаг вдоль стены
+EDGE_ROW2_INSET = 120    # и отступ от стены
 
 
 def octagon(cx, cy, r):
@@ -365,7 +370,7 @@ def edge_trees(zones, vertices, sidedefs, linedefs, rng):
         length = math.hypot(bx - ax, by - ay)
         nx, ny = (by - ay) / length, -(bx - ax) / length   # внутрь сектора (правая сторона)
         on_path = zone.kind == "path"
-        step = 112 if on_path else 96
+        step = 80 if on_path else 72
         inset = 28 if on_path else 44
         n = int(length // step)
         for i in range(n):
@@ -373,9 +378,21 @@ def edge_trees(zones, vertices, sidedefs, linedefs, rng):
             d = inset + rng.uniform(0, 12)
             x, y = ax + (bx - ax) * t + nx * d, ay + (by - ay) * t + ny * d
             if on_path:
-                kind = rng.choice([THING_TREE_BURNT, THING_TREE_BURNT, THING_STUMP])
+                kind = rng.choice([THING_TREE_BURNT, THING_TREE_BURNT, THING_TREE_BURNT, THING_STUMP])
             else:
                 kind = rng.choice([THING_TREE_BIG, THING_TREE_BIG, THING_TREE_BURNT])
+            things.append((int(x), int(y), rng.randrange(0, 360, 45), kind, SKILL_ALL))
+        if on_path or zone.kind == "start":
+            continue
+        # второй, редкий ряд на полянах: опушка гуще, а деревьев для пилы больше
+        n2 = int(length // EDGE_ROW2_STEP)
+        for i in range(n2):
+            t = (i + 0.5 + rng.uniform(-0.3, 0.3)) / max(n2, 1)
+            if not 0.15 < t < 0.85:
+                continue
+            d = EDGE_ROW2_INSET + rng.uniform(-16, 24)
+            x, y = ax + (bx - ax) * t + nx * d, ay + (by - ay) * t + ny * d
+            kind = rng.choice([THING_TREE_BIG, THING_TREE_BURNT, THING_TREE_BURNT])
             things.append((int(x), int(y), rng.randrange(0, 360, 45), kind, SKILL_ALL))
     return things
 
@@ -388,16 +405,16 @@ def place_things(zones, rng, player_start):
         cx, cy = z.center
         placed = []
         attempts = 0
-        while len(placed) < 10 and attempts < 500:
+        while len(placed) < CLEARING_TREES and attempts < 800:
             attempts += 1
             ang = rng.uniform(0, 2 * math.pi)
             # не загораживаем входы/выходы троп (оси N/E/S/W)
             if min(abs(((ang - k * math.pi / 2) + math.pi) % (2 * math.pi) - math.pi)
                    for k in range(4)) < 0.35:
                 continue
-            dist = rng.uniform(0.45, 0.78) * z.radius
+            dist = rng.uniform(0.4, 0.78) * z.radius
             x, y = cx + dist * math.cos(ang), cy + dist * math.sin(ang)
-            if any(math.hypot(x - px, y - py) < 160 for px, py in placed):
+            if any(math.hypot(x - px, y - py) < 144 for px, py in placed):
                 continue
             placed.append((x, y))
             kind = rng.choice([THING_TREE_BIG, THING_TREE_BIG, THING_TREE_BURNT, THING_STUMP])
