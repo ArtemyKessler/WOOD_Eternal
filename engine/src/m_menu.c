@@ -6239,6 +6239,11 @@ void M_SetupNextMenu(menu_t *menudef)
 //
 void M_Ticker (void)
 {
+  // WOOD: на стартовом экране меню открыто всегда — не нужно искать Esc.
+  if (WOOD_Enabled() && gamestate == GS_DEMOSCREEN && gameaction == ga_nothing &&
+      !menuactive && !messageToPrint)
+    M_StartControlPanel();
+
   if (--skullAnimCounter <= 0)
     {
       whichSkull ^= 1;
