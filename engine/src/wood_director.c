@@ -87,6 +87,11 @@ static mobj_t *wave[WOOD_MAX_WAVE];
 static int wave_size;
 static int barrier[WOOD_MAX_BARRIER]; /* индексы линий, закрытых на время боя */
 static int barrier_size;
+#define WOOD_MAX_TORCHES     128
+#define WOOD_TORCH_DOOMEDNUM 46       /* красный факел: видимая «огненная изгородь» */
+#define WOOD_TORCH_STEP      (40 * FRACUNIT)
+static mobj_t *torches[WOOD_MAX_TORCHES];
+static int num_torches;
 static int waves_cleared;             /* всего зачисток за забег — ось сложности */
 static int lap;
 static unsigned int rng_state = 1;
@@ -260,6 +265,26 @@ static dboolean Wood_PickSpot(const wood_clearing_t *c, mobj_t *player, fixed_t 
   return false;
 }
 
+/* Ставит факелы вдоль линии: невидимую стену делаем видимой. */
+static void Wood_PlaceTorches(const line_t *ln)
+{
+  static mobjtype_t torch_type = NUMMOBJTYPES;
+  fixed_t len = P_AproxDistance(ln->dx, ln->dy);
+  int n, k;
+
+  if (torch_type == NUMMOBJTYPES)
+    torch_type = Wood_TypeForDoomednum(WOOD_TORCH_DOOMEDNUM);
+  if (torch_type == NUMMOBJTYPES || len <= 0)
+    return;
+  n = len / WOOD_TORCH_STEP + 1;
+  for (k = 0; k <= n && num_torches < WOOD_MAX_TORCHES; k++)
+  {
+    fixed_t x = ln->v1->x + FixedMul(ln->dx, FixedDiv(k, n));
+    fixed_t y = ln->v1->y + FixedMul(ln->dy, FixedDiv(k, n));
+    torches[num_torches++] = Wood_SpawnWithFog(x, y, torch_type);
+  }
+}
+
 static void Wood_SetBarrier(const wood_clearing_t *c, dboolean on)
 {
   int i;
@@ -273,6 +298,7 @@ static void Wood_SetBarrier(const wood_clearing_t *c, dboolean on)
       {
         ln->flags |= ML_BLOCKING;
         barrier[barrier_size++] = ln - lines;
+        Wood_PlaceTorches(ln);
       }
     }
   }
@@ -281,6 +307,15 @@ static void Wood_SetBarrier(const wood_clearing_t *c, dboolean on)
     for (i = 0; i < barrier_size; i++)
       lines[barrier[i]].flags &= ~ML_BLOCKING;
     barrier_size = 0;
+    for (i = 0; i < num_torches; i++)
+    {
+      mobj_t *fog = P_SpawnMobj(torches[i]->x, torches[i]->y, torches[i]->z, MT_IFOG);
+      if (!i)
+        S_StartSound(fog, sfx_itmbk);
+      P_RemoveMobj(torches[i]);
+      torches[i] = NULL;
+    }
+    num_torches = 0;
   }
 }
 
@@ -430,6 +465,9 @@ void WOOD_LevelStart(void)
   for (i = 0; i < WOOD_MAX_WAVE; i++)
     wave[i] = NULL;
   wave_size = barrier_size = 0;
+  for (i = 0; i < WOOD_MAX_TORCHES; i++)
+    torches[i] = NULL;
+  num_torches = 0;
   current = -1;
   waves_cleared = lap = 0;
 

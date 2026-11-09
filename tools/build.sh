@@ -15,7 +15,7 @@ mkdir -p "$CACHE"
 # 1. Freedoom (BSD-3) — источник ресурсов.
 FD_ZIP="$CACHE/freedoom-$FREEDOOM_VER.zip"
 if [ ! -f "$FD_ZIP" ]; then
-  curl -fsSL -o "$FD_ZIP" \
+  curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o "$FD_ZIP" \
     "https://github.com/freedoom/freedoom/releases/download/v$FREEDOOM_VER/freedoom-$FREEDOOM_VER.zip"
 fi
 echo "$FREEDOOM_SHA256  $FD_ZIP" | sha256sum -c -
@@ -23,7 +23,8 @@ unzip -o -q -j "$FD_ZIP" "freedoom-$FREEDOOM_VER/freedoom2.wad" -d "$CACHE"
 
 # 2. Карта (генерируется скриптом, ноды строит наш nodebuild.py) и урезанный IWAD.
 python3 "$ROOT/tools/mapgen/gen_forest.py" "$CACHE/map01.wad"
-python3 -I "$ROOT/tools/build_iwad.py" "$CACHE/freedoom2.wad" "$ROOT/wad/lumps" "$CACHE/map01.wad" "$CACHE/wood.wad"
+python3 "$ROOT/tools/make_title.py" "$CACHE/freedoom2.wad" "$CACHE/gfx"
+python3 -I "$ROOT/tools/build_iwad.py" "$CACHE/freedoom2.wad" "$ROOT/wad/lumps:$CACHE/gfx" "$CACHE/map01.wad" "$CACHE/wood.wad"
 
 # 3. prboomx.wad — служебный WAD движка, собирается нативной сборкой.
 if [ ! -f "$CACHE/prboomx.wad" ]; then

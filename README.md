@@ -14,6 +14,10 @@
 Когда зачищены все три поляны, начинается новый круг, сложность продолжает расти.
 Смерть — новый забег с нуля. Баланс настраивается в `wad/lumps/woodcfg.txt` без пересборки движка.
 
+Во время боя входы на поляну перекрыты рядом красных факелов. Свой титульник и логотип меню
+рисует `tools/make_title.py`. Из Freedoom в `wood.wad` попадает только то, что реально
+используется: 28.8 МБ → 3.7 МБ (≈2.2 МБ в gzip).
+
 ## Структура
 
 | Путь | Что там |
@@ -22,7 +26,8 @@
 | `wad/lumps/` | Наши лампы, которые кладутся в `wood.wad`. `woodcfg.txt` — баланс волн и наград. |
 | `tools/mapgen/gen_forest.py` | Генератор лесной карты MAP01 (раскладка зон, деревья). |
 | `tools/mapgen/nodebuild.py` | Простой BSP-нодбилдер на Python: сборка карты без внешних утилит. |
-| `tools/build_iwad.py` | Собирает `wood.wad` из `freedoom2.wad`: выкидывает карты Freedoom, лишнюю музыку и спрайты, добавляет нашу карту. |
+| `tools/build_iwad.py` | Собирает `wood.wad` из `freedoom2.wad`: оставляет только используемые текстуры, флэты, спрайты и звуки, добавляет нашу карту и графику. Список нужных спрайтов — `KEEP_SPRITES`. |
+| `tools/make_title.py` | Рисует титульник `TITLEPIC` и логотип меню `M_DOOM` в палитре игры. |
 | `tools/build.sh` | Полная сборка в `dist/`. |
 | `.github/workflows/pages.yml` | CI: сборка и деплой на GitHub Pages. |
 | `LICENSES/` | Тексты лицензий (GPL-2.0, Freedoom BSD-3, авторы Freedoom). |
@@ -30,7 +35,7 @@
 ## Сборка (Linux / WSL)
 
 Нужны: [emsdk](https://emscripten.org/docs/getting_started/downloads.html), `cmake`, `gcc`,
-`libsdl2-dev`, `python3`, `curl`, `unzip`.
+`libsdl2-dev`, `python3` с Pillow, шрифт DejaVu, `curl`, `unzip`.
 
 ```sh
 source ~/emsdk/emsdk_env.sh
