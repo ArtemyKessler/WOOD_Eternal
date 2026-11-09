@@ -6485,6 +6485,12 @@ void M_Init(void)
       MainMenu[readthis] = MainMenu[quitdoom];
       MainDef.numitems--;
       MainDef.y += 8;
+      // WOOD: сохранений нет — убираем Load Game / Save Game, Quit Game встаёт третьим.
+      if (WOOD_Enabled())
+      {
+        MainMenu[2] = MainMenu[quitdoom];
+        MainDef.numitems = 3;
+      }
       if (!EpiCustom)
         NewDef.prevMenu = &MainDef;
       ReadDef1.routine = M_DrawReadThis1;

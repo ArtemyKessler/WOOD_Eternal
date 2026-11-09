@@ -140,18 +140,30 @@ def forest_background(w, h, seed=7):
     return img
 
 
+# Меню движка рисует M_DOOM в точке (94, 2) экрана 320x200 и рисует его поверх TITLEPIC.
+# Поэтому логотип на титульнике стоит ровно там же, где M_DOOM, а надписи — ниже пунктов
+# меню (New Game / Options / Quit Game занимают y = 72..120).
+MENU_LOGO_SIZE = 56
+MENU_LOGO_X, MENU_LOGO_Y = 94, 2
+
+
+def menu_logo_image():
+    logo = wood_text(MENU_LOGO_SIZE, "WOOD")
+    return logo, (320 - logo.width) // 2, MENU_LOGO_Y
+
+
 def make_titlepic(pal):
     img = forest_background(320, 200)
-    logo = wood_text(70, "WOOD")
-    img.alpha_composite(logo, ((320 - logo.width) // 2, 30))
+    logo, x, y = menu_logo_image()
+    img.alpha_composite(logo, (x, y))
     sub = font(11)
     d = ImageDraw.Draw(img)
-    for text, y, color in (("A ROGUELIKE IN THE WOODS", 132, (220, 200, 150)),
-                           ("(now read it upside down)", 150, (150, 160, 130)),
-                           ("powered by Freedoom", 184, (120, 130, 110))):
+    for text, ty, color in (("A ROGUELIKE IN THE WOODS", 140, (220, 200, 150)),
+                            ("(now read it upside down)", 157, (150, 160, 130)),
+                            ("powered by Freedoom", 184, (120, 130, 110))):
         tw = d.textlength(text, font=sub)
-        d.text(((320 - tw) // 2 + 1, y + 1), text, font=sub, fill=(0, 0, 0, 255))
-        d.text(((320 - tw) // 2, y), text, font=sub, fill=color + (255,))
+        d.text(((320 - tw) // 2 + 1, ty + 1), text, font=sub, fill=(0, 0, 0, 255))
+        d.text(((320 - tw) // 2, ty), text, font=sub, fill=color + (255,))
     return doom_picture(to_palette(img, pal)), img
 
 
@@ -222,9 +234,9 @@ def make_sky(pal, seed=11):
 
 
 def make_menu_logo(pal):
-    logo = wood_text(48, "WOOD")
-    # меню рисует M_DOOM по центру сверху; смещение 0,0 как у оригинала
-    return doom_picture(to_palette(logo, pal)), logo
+    logo, x, _ = menu_logo_image()
+    # смещение по X: движок рисует в (94 - left), а нам нужно по центру, как на титульнике
+    return doom_picture(to_palette(logo, pal), left=MENU_LOGO_X - x), logo
 
 
 def main():
