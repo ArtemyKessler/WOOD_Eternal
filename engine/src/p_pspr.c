@@ -48,6 +48,7 @@
 #include "lprintf.h"
 #include "e6y.h"//e6y
 #include "c_cvar.h"
+#include "wood_director.h"
 
 #define LOWERSPEED   (FRACUNIT*6)
 #define RAISESPEED   (FRACUNIT*6)
@@ -591,7 +592,11 @@ void A_Saw(player_t *player, pspdef_t *psp)
 
   if (!linetarget)
     {
-      S_StartSound(player->mo, sfx_sawful);
+      // WOOD: дерево перед игроком — пилим его
+      if (WOOD_SawTree(player, angle, damage))
+        S_StartSound(player->mo, sfx_sawhit);
+      else
+        S_StartSound(player->mo, sfx_sawful);
       return;
     }
 
