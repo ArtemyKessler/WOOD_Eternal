@@ -39,6 +39,7 @@
 #include "p_map.h"
 #include "p_spec.h"
 #include "p_user.h"
+#include "wood_director.h"
 #include "r_demo.h"
 #include "r_fps.h"
 #include "g_game.h"
@@ -420,7 +421,12 @@ void P_DeathThink (player_t* player)
   else if (player->damagecount)
     player->damagecount--;
 
-  if (player->cmd.buttons & BT_USE)
+  if (WOOD_Enabled())                 // WOOD: «Again?» — пробел/Enter после короткой паузы
+  {
+    if (WOOD_DeathThink(player))
+      player->playerstate = PST_REBORN;
+  }
+  else if (player->cmd.buttons & BT_USE)
     player->playerstate = PST_REBORN;
   R_SmoothPlaying_Reset(player); // e6y
 }
