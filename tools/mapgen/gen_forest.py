@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Генератор лесной карты WOOD (MAP01).
+"""Генератор лесных карт WOOD.
 
-Карта описывается как набор многоугольных зон (старт, тропы, поляны). Каждая зона — свой
-сектор. Общие рёбра соседних зон становятся двусторонними линиями, остальные — стеной леса.
-Над всем открытое небо. Поляны получают теги 1..N — по ним директор волн будет их находить.
+Делает пул случайных раскладок MAP01..MAPnn; движок на каждый забег выбирает одну из них
+(см. WOOD_PickRunMap). Раскладка — дерево полян на сетке с развилками и иногда петлёй.
 
-Использование: gen_forest.py <out/map01.wad> [seed]
+Каждая зона (старт, тропа, поляна) — свой сектор. Общие рёбра соседних зон становятся
+двусторонними линиями, остальные — стеной леса. Над всем открытое небо. Поляны получают
+теги 1..N — по ним директор волн их находит.
+
+Использование: gen_forest.py <out/maps.wad> [число_карт=16] [seed=1]
 """
 import math
 import os
@@ -57,25 +60,104 @@ class Zone:
         self.center, self.radius = center, radius
 
 
-def layout():
-    """Лес v1: старт → тропа на север → поляна 1 → тропа на восток → поляна 2 → тропа на север → поляна 3."""
-    zones = []
-    start = (0, 0, 320)
-    c1 = (0, 2304, 896)
-    c2 = (3072, 2304, 896)
-    c3 = (3072, 4864, 1024)
+GRID = 5                 # сетка GRID x GRID ячеек под поляны
+CELL = 2560              # шаг сетки, юнитов
+START_RADIUS = 384
+CLEARING_RADII = (704, 768, 832, 896, 960)
+JITTER = 48              # сдвиг центров полян, чтобы раскладка не была идеальной решёткой
+MIN_CLEARINGS, MAX_CLEARINGS = 7, 10
 
-    zones.append(Zone("start", octagon(*start), light=160, center=start[:2], radius=start[2]))
-    zones.append(Zone("path", rect(-PATH_HALF_WIDTH, start[1] + flat_extent(start[2]),
-                                   PATH_HALF_WIDTH, c1[1] - flat_extent(c1[2])), light=144))
-    zones.append(Zone("clearing", octagon(*c1), tag=1, light=176, center=c1[:2], radius=c1[2]))
-    zones.append(Zone("path", rect(c1[0] + flat_extent(c1[2]), c1[1] - PATH_HALF_WIDTH,
-                                   c2[0] - flat_extent(c2[2]), c1[1] + PATH_HALF_WIDTH), light=144))
-    zones.append(Zone("clearing", octagon(*c2), tag=2, light=176, center=c2[:2], radius=c2[2]))
-    zones.append(Zone("path", rect(c2[0] - PATH_HALF_WIDTH, c2[1] + flat_extent(c2[2]),
-                                   c2[0] + PATH_HALF_WIDTH, c3[1] - flat_extent(c3[2])), light=144))
-    zones.append(Zone("clearing", octagon(*c3), tag=3, light=176, center=c3[:2], radius=c3[2]))
-    return zones
+
+def flat_half(r):
+    return int(round(r * math.sin(math.pi / 8)))
+
+
+def layout(rng):
+    """Случайный лес: дерево полян на сетке (развилки — узлы с 3–4 тропами) плюс иногда петля.
+
+    Возвращает зоны и стартовую точку (x, y, угол).
+    """
+    want = rng.randint(MIN_CLEARINGS, MAX_CLEARINGS)
+    start = (rng.randrange(GRID), rng.randrange(GRID))
+    cells = [start]
+    edges = set()
+    frontier = []
+
+    def neighbours(c):
+        x, y = c
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            if 0 <= x + dx < GRID and 0 <= y + dy < GRID:
+                yield (x + dx, y + dy)
+
+    for n in neighbours(start):
+        frontier.append((start, n))
+    while len(cells) < want + 1 and frontier:
+        a, b = frontier.pop(rng.randrange(len(frontier)))
+        if b in cells:
+            continue
+        cells.append(b)
+        edges.add(frozenset((a, b)))
+        for n in neighbours(b):
+            if n not in cells:
+                frontier.append((b, n))
+
+    # иногда добавляем петлю: две соседние поляны без прямой тропы
+    if rng.random() < 0.6:
+        extra = [frozenset((a, b)) for a in cells for b in neighbours(a)
+                 if b in cells and frozenset((a, b)) not in edges and start not in (a, b)]
+        if extra:
+            edges.add(rng.choice(extra))
+
+    # центры и радиусы
+    nodes = {}
+    for c in cells:
+        cx, cy = c[0] * CELL, c[1] * CELL
+        if c == start:
+            nodes[c] = (cx, cy, START_RADIUS)
+        else:
+            nodes[c] = (cx + rng.randint(-JITTER, JITTER), cy + rng.randint(-JITTER, JITTER),
+                        rng.choice(CLEARING_RADII))
+
+    zones = []
+    # поляны нумеруем по удалённости от старта (BFS) — так теги идут «вглубь леса»
+    order, seen, queue = [], {start}, [start]
+    while queue:
+        c = queue.pop(0)
+        order.append(c)
+        for n in neighbours(c):
+            if n not in seen and frozenset((c, n)) in edges:
+                seen.add(n)
+                queue.append(n)
+    tag = 0
+    for c in order:
+        x, y, r = nodes[c]
+        if c == start:
+            zones.append(Zone("start", octagon(x, y, r), light=160, center=(x, y), radius=r))
+        else:
+            tag += 1
+            zones.append(Zone("clearing", octagon(x, y, r), tag=tag, light=176, center=(x, y), radius=r))
+
+    for e in edges:
+        a, b = sorted(e)
+        (ax, ay, ar), (bx, by, br) = nodes[a], nodes[b]
+        if a[1] == b[1]:   # горизонтальная тропа: a слева
+            lo = max(ay - (flat_half(ar) - PATH_HALF_WIDTH), by - (flat_half(br) - PATH_HALF_WIDTH))
+            hi = min(ay + (flat_half(ar) - PATH_HALF_WIDTH), by + (flat_half(br) - PATH_HALF_WIDTH))
+            pc = (lo + hi) // 2
+            zones.append(Zone("path", rect(ax + flat_extent(ar), pc - PATH_HALF_WIDTH,
+                                           bx - flat_extent(br), pc + PATH_HALF_WIDTH), light=144))
+        else:              # вертикальная тропа: a снизу
+            lo = max(ax - (flat_half(ar) - PATH_HALF_WIDTH), bx - (flat_half(br) - PATH_HALF_WIDTH))
+            hi = min(ax + (flat_half(ar) - PATH_HALF_WIDTH), bx + (flat_half(br) - PATH_HALF_WIDTH))
+            pc = (lo + hi) // 2
+            zones.append(Zone("path", rect(pc - PATH_HALF_WIDTH, ay + flat_extent(ar),
+                                           pc + PATH_HALF_WIDTH, by - flat_extent(br)), light=144))
+
+    # игрок смотрит в сторону первой тропы от старта
+    first = next(n for n in neighbours(start) if frozenset((start, n)) in edges)
+    angle = {(1, 0): 0, (0, 1): 90, (-1, 0): 180, (0, -1): 270}[(first[0] - start[0], first[1] - start[1])]
+    sx, sy, _ = nodes[start]
+    return zones, (sx, sy, angle)
 
 
 def insert_tjunctions(zones):
@@ -166,8 +248,8 @@ def edge_trees(zones, vertices, sidedefs, linedefs, rng):
     return things
 
 
-def place_things(zones, rng):
-    things = [(0, -160, 90, THING_PLAYER1, SKILL_ALL)]
+def place_things(zones, rng, player_start):
+    things = [(player_start[0], player_start[1], player_start[2], THING_PLAYER1, SKILL_ALL)]
     for z in zones:
         if z.kind != "clearing":
             continue
@@ -195,12 +277,12 @@ def pack_name(s):
     return s.encode("ascii").ljust(8, b"\0")
 
 
-def write_map(path, vertices, sectors, sidedefs, linedefs, things):
+def map_lumps(mapname, vertices, sectors, sidedefs, linedefs, things):
     b = Builder(vertices, [(l[0], l[1], l[5], l[6]) for l in linedefs])
     b.build()
     segs = b.segs_lump()   # до VERTEXES: может добавить вершины
     lumps = [
-        ("MAP01", b""),
+        (mapname, b""),
         ("THINGS", b"".join(struct.pack("<hhhhh", *t) for t in things)),
         ("LINEDEFS", b"".join(struct.pack("<HHhhhHH", l[0], l[1], l[2], l[3], l[4],
                                           l[5], l[6] & 0xFFFF) for l in linedefs)),
@@ -215,6 +297,12 @@ def write_map(path, vertices, sectors, sidedefs, linedefs, things):
         ("REJECT", b""),
         ("BLOCKMAP", b""),
     ]
+    print(f"{mapname}: {sum(1 for x in sectors if x[6])} полян, {len(sectors)} секторов, "
+          f"{len(linedefs)} линий, {len(things)} вещей, {len(b.nodes)} нод")
+    return lumps
+
+
+def write_wad(path, lumps):
     body, directory, pos = bytearray(), bytearray(), 12
     for name, data in lumps:
         directory += struct.pack("<ii", pos, len(data)) + pack_name(name)
@@ -222,19 +310,22 @@ def write_map(path, vertices, sectors, sidedefs, linedefs, things):
         pos += len(data)
     with open(path, "wb") as f:
         f.write(struct.pack("<4sii", b"PWAD", len(lumps), pos) + bytes(body) + bytes(directory))
-    print(f"map01: {len(sectors)} секторов, {len(linedefs)} линий, {len(things)} вещей, "
-          f"{len(b.nodes)} нод, {len(b.ssectors)} подсекторов")
 
 
 def main():
     out = sys.argv[1]
-    seed = int(sys.argv[2]) if len(sys.argv) > 2 else 1
-    zones = layout()
-    insert_tjunctions(zones)
-    vertices, sectors, sidedefs, linedefs = build_geometry(zones)
-    rng = random.Random(seed)
-    things = place_things(zones, rng) + edge_trees(zones, vertices, sidedefs, linedefs, rng)
-    write_map(out, vertices, sectors, sidedefs, linedefs, things)
+    count = int(sys.argv[2]) if len(sys.argv) > 2 else 16
+    base_seed = int(sys.argv[3]) if len(sys.argv) > 3 else 1
+    lumps = []
+    for i in range(count):
+        rng = random.Random(base_seed * 1000 + i)
+        zones, player_start = layout(rng)
+        insert_tjunctions(zones)
+        vertices, sectors, sidedefs, linedefs = build_geometry(zones)
+        things = place_things(zones, rng, player_start) + \
+            edge_trees(zones, vertices, sidedefs, linedefs, rng)
+        lumps += map_lumps(f"MAP{i + 1:02d}", vertices, sectors, sidedefs, linedefs, things)
+    write_wad(out, lumps)
 
 
 if __name__ == "__main__":

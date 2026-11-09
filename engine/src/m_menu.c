@@ -55,6 +55,8 @@
 #include "s_sound.h"
 #include "sounds.h"
 #include "m_menu.h"
+#include "wood_director.h"
+#define WOOD_NOSAVE_MSG "saving is disabled.\nin the woods you only live once.\n\n" PRESSKEY
 #include "d_deh.h"
 #include "m_misc.h"
 #include "lprintf.h"
@@ -897,6 +899,10 @@ void M_ForcedLoadGame(const char *msg)
 
 void M_LoadGame (int choice)
 {
+  if (WOOD_Enabled()) { // WOOD: в лесу живут один раз
+    M_StartMessage(WOOD_NOSAVE_MSG, NULL, false);
+    return;
+  }
   delete_verify = false;
 
   /* killough 5/26/98: exclude during demo recordings
@@ -1090,6 +1096,10 @@ void M_SaveSelect(int choice)
 //
 void M_SaveGame (int choice)
 {
+  if (WOOD_Enabled()) { // WOOD: в лесу живут один раз
+    M_StartMessage(WOOD_NOSAVE_MSG, NULL, false);
+    return;
+  }
   delete_verify = false;
 
   // killough 10/6/98: allow savegames during single-player demo playback
@@ -1495,6 +1505,10 @@ static void M_QuickSaveResponse(int ch)
 
 void M_QuickSave(void)
 {
+  if (WOOD_Enabled()) { // WOOD: в лесу живут один раз
+    M_StartMessage(WOOD_NOSAVE_MSG, NULL, false);
+    return;
+  }
   if (!usergame && (!demoplayback || netgame)) { /* killough 10/98 */
     S_StartSound(NULL,sfx_oof);
     return;
@@ -1533,6 +1547,10 @@ static void M_QuickLoadResponse(int ch)
 
 void M_QuickLoad(void)
 {
+  if (WOOD_Enabled()) { // WOOD: в лесу живут один раз
+    M_StartMessage(WOOD_NOSAVE_MSG, NULL, false);
+    return;
+  }
   // cph - removed restriction against quickload in a netgame
 
   if (demorecording) {  // killough 5/26/98: exclude during demo recordings

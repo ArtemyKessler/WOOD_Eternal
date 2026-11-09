@@ -79,6 +79,7 @@
 #include "d_deh.h"              // Ty 3/27/98 deh declarations
 #include "p_inter.h"
 #include "g_game.h"
+#include "wood_director.h"
 #include "lprintf.h"
 #include "i_main.h"
 #include "i_system.h"
@@ -1595,7 +1596,11 @@ void G_DeathMatchSpawnPlayer (int playernum)
 void G_DoReborn (int playernum)
 {
   if (!netgame)
+  {
+    if (WOOD_Enabled())             // WOOD: смерть — новый забег в новой раскладке леса
+      gamemap = WOOD_PickRunMap(gamemap);
     gameaction = ga_loadlevel;      // reload the level from scratch
+  }
   else
     {                               // respawn at the start
       int i;
@@ -3038,6 +3043,10 @@ void G_InitNew(skill_t skill, int episode, int map)
 
   if (skill > sk_nightmare)
     skill = sk_nightmare;
+
+  // WOOD: каждый новый забег — случайная раскладка леса (кроме явного -warp для тестов)
+  if (WOOD_Enabled() && !demoplayback && !M_CheckParm("-warp"))
+    map = WOOD_PickRunMap(0);
 
   if (episode < 1)
     episode = 1;

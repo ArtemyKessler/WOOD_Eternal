@@ -7,7 +7,7 @@
     TEXTURE1/PNAMES и выкидывает неиспользуемые патчи;
   * оставляет только флэты, которые использует карта (+ служебные);
   * оставляет только спрайты из KEEP_SPRITES (игрок, оружие, наши враги, предметы, деревья);
-  * выкидывает музыку, кроме KEEP_MUSIC, демо-записи, звуки PC-спикера и звуки
+  * выкидывает музыку, кроме перечисленной в WOODCFG, демо-записи, звуки PC-спикера и звуки
     выкинутых монстров;
   * добавляет лампы из каталога wad/lumps/ (WOODCFG, TITLEPIC и т.п.), заменяя одноимённые.
 
@@ -19,7 +19,7 @@ import re
 import struct
 import sys
 
-KEEP_MUSIC = {"D_RUNNIN"}
+# Музыка: всё, что перечислено в music_calm/music_battle в WOODCFG (см. woodcfg_music()).
 
 # Спрайты (первые 4 буквы имени), которые нужны игре. Всё остальное выкидывается.
 # Если директор начнёт спавнить что-то новое — добавить сюда, иначе движок упадёт.
@@ -92,6 +92,19 @@ def name8(raw):
 
 def pack8(name):
     return name.encode("ascii").ljust(8, b"\0")
+
+
+def woodcfg_music(lumps_dirs):
+    tracks = set()
+    for lumps_dir in lumps_dirs.split(os.pathsep):
+        path = os.path.join(lumps_dir, "woodcfg.txt")
+        if not os.path.exists(path):
+            continue
+        for line in open(path, encoding="utf-8"):
+            words = line.split("#", 1)[0].split()
+            if words and words[0] in ("music_calm", "music_battle"):
+                tracks.update(w.upper() for w in words[1:])
+    return tracks
 
 
 # --- что использует карта ---
@@ -173,7 +186,7 @@ def trim_textures(lumps, used):
 
 # --- основной проход ---
 
-def strip(lumps, keep_patches, keep_flats):
+def strip(lumps, keep_patches, keep_flats, keep_music):
     out = []
     section = None
     skipping_map = False
@@ -204,7 +217,7 @@ def strip(lumps, keep_patches, keep_flats):
             if not name.endswith("_START") and not name.endswith("_END") and name not in keep_patches:
                 continue
         else:
-            if name.startswith("D_") and name not in KEEP_MUSIC:
+            if name.startswith("D_") and name not in keep_music:
                 continue
             if re.fullmatch(r"DEMO\d", name):  # демо-записи ссылаются на выкинутые карты
                 continue
@@ -240,7 +253,8 @@ def main():
     lumps = [(n, tex1 if n == "TEXTURE1" else pnames if n == "PNAMES" else d)
              for n, d in lumps if n != "TEXTURE2"]
 
-    stripped = strip(lumps, keep_patches, KEEP_FLATS | used_flats)
+    keep_music = woodcfg_music(lumps_dir)
+    stripped = strip(lumps, keep_patches, KEEP_FLATS | used_flats, keep_music)
     stripped = add_custom(stripped, lumps_dir) + maps
     size = write_wad(dst, ident, stripped)
     print(f"wood.wad: {len(lumps)} -> {len(stripped)} lumps, текстур {ntex_before} -> {ntex_after}, "
