@@ -25,9 +25,7 @@ DROP_SPRITES = {
     "PAIN",  # элементаль боли
     "SSWV",  # эсэсовец
     "KEEN",
-    "BOSS", "BOS2",  # бароны/рыцари
     "SKEL",  # ревенант
-    "HEAD",  # какодемон
 }
 MAP_LUMPS = {"THINGS", "LINEDEFS", "SIDEDEFS", "VERTEXES", "SEGS", "SSECTORS",
              "NODES", "SECTORS", "REJECT", "BLOCKMAP", "BEHAVIOR"}

@@ -35,6 +35,7 @@
 #include "p_user.h"
 #include "p_spec.h"
 #include "p_tick.h"
+#include "wood_director.h"
 #include "p_map.h"
 #include "r_fps.h"
 #include "e6y.h"
@@ -321,6 +322,7 @@ void P_Ticker (void)
         P_RunThinkers();
         P_UpdateSpecials();
         P_RespawnSpecials();
+        WOOD_Ticker();   // WOOD: директор волн
     }
     P_MapEnd();
     leveltime++;                       // for par times

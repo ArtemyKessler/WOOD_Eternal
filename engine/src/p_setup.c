@@ -46,6 +46,7 @@
 #include "p_setup.h"
 #include "p_spec.h"
 #include "p_tick.h"
+#include "wood_director.h"
 #include "p_enemy.h"
 #include "s_sound.h"
 #include "s_advsound.h"
@@ -2828,6 +2829,9 @@ void P_SetupLevel(int episode, int map, int playermask, skill_t skill)
 
   // set up world state
   P_SpawnSpecials();
+
+  // WOOD: директор волн (стартовое оружие, поиск полян)
+  WOOD_LevelStart();
 
   P_MapEnd();
 
