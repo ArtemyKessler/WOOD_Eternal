@@ -6,7 +6,8 @@
 
 Каждая зона (старт, тропа, поляна) — свой сектор. Общие рёбра соседних зон становятся
 двусторонними линиями, остальные — стеной леса. Над всем открытое небо. Поляны получают
-теги 1..N — по ним директор волн их находит.
+теги 1..N — по ним директор волн их находит. Самая дальняя тупиковая поляна — логово босса:
+она больше, темнее, с тегом BOSS_TAG; директор открывает её, когда зачищены все остальные.
 
 Использование: gen_forest.py <out/maps.wad> [число_карт=16] [seed=1]
 """
@@ -60,12 +61,15 @@ class Zone:
         self.center, self.radius = center, radius
 
 
-GRID = 5                 # сетка GRID x GRID ячеек под поляны
+GRID = 6                 # сетка GRID x GRID ячеек под поляны
 CELL = 2560              # шаг сетки, юнитов
 START_RADIUS = 384
 CLEARING_RADII = (704, 768, 832, 896, 960)
 JITTER = 48              # сдвиг центров полян, чтобы раскладка не была идеальной решёткой
-MIN_CLEARINGS, MAX_CLEARINGS = 7, 10
+MIN_CLEARINGS, MAX_CLEARINGS = 11, 14   # обычные поляны, без логова босса
+BOSS_TAG = 100           # должен совпадать с WOOD_BOSS_TAG в engine/src/wood_director.c
+BOSS_RADIUS = 1216
+FLOOR_BOSS = os.environ.get("WOOD_BOSS_FLOOR", "RROCK16")
 
 
 def flat_half(r):
@@ -77,7 +81,7 @@ def layout(rng):
 
     Возвращает зоны и стартовую точку (x, y, угол).
     """
-    want = rng.randint(MIN_CLEARINGS, MAX_CLEARINGS)
+    want = rng.randint(MIN_CLEARINGS, MAX_CLEARINGS) + 1   # +1 — логово босса
     start = (rng.randrange(GRID), rng.randrange(GRID))
     cells = [start]
     edges = set()
@@ -101,10 +105,22 @@ def layout(rng):
             if n not in cells:
                 frontier.append((b, n))
 
-    # иногда добавляем петлю: две соседние поляны без прямой тропы
+    # логово босса — самый дальний от старта тупик дерева: туда ведёт ровно одна тропа
+    depth, queue = {start: 0}, [start]
+    while queue:
+        c = queue.pop(0)
+        for n in neighbours(c):
+            if n not in depth and frozenset((c, n)) in edges:
+                depth[n] = depth[c] + 1
+                queue.append(n)
+    leaves = [c for c in cells if c != start and sum(1 for e in edges if c in e) == 1]
+    boss = max(leaves, key=lambda c: (depth[c], rng.random()))
+
+    # иногда добавляем петлю: две соседние поляны без прямой тропы (не через старт и не в логово)
     if rng.random() < 0.6:
         extra = [frozenset((a, b)) for a in cells for b in neighbours(a)
-                 if b in cells and frozenset((a, b)) not in edges and start not in (a, b)]
+                 if b in cells and frozenset((a, b)) not in edges and start not in (a, b)
+                 and boss not in (a, b)]
         if extra:
             edges.add(rng.choice(extra))
 
@@ -114,6 +130,8 @@ def layout(rng):
         cx, cy = c[0] * CELL, c[1] * CELL
         if c == start:
             nodes[c] = (cx, cy, START_RADIUS)
+        elif c == boss:
+            nodes[c] = (cx, cy, BOSS_RADIUS)
         else:
             nodes[c] = (cx + rng.randint(-JITTER, JITTER), cy + rng.randint(-JITTER, JITTER),
                         rng.choice(CLEARING_RADII))
@@ -133,6 +151,8 @@ def layout(rng):
         x, y, r = nodes[c]
         if c == start:
             zones.append(Zone("start", octagon(x, y, r), light=160, center=(x, y), radius=r))
+        elif c == boss:
+            zones.append(Zone("boss", octagon(x, y, r), tag=BOSS_TAG, light=128, center=(x, y), radius=r))
         else:
             tag += 1
             zones.append(Zone("clearing", octagon(x, y, r), tag=tag, light=176, center=(x, y), radius=r))
@@ -196,7 +216,7 @@ def build_geometry(zones):
     sectors, sidedefs, linedefs = [], [], []
     edges = {}  # (va, vb) -> (zone index)
     for zi, z in enumerate(zones):
-        floor = FLOOR_CLEARING if z.kind == "clearing" else FLOOR_PATH
+        floor = {"clearing": FLOOR_CLEARING, "boss": FLOOR_BOSS}.get(z.kind, FLOOR_PATH)
         sectors.append((FLOOR_H, CEIL_H, floor, CEILING, z.light, 0, z.tag))
         n = len(z.poly)
         for i in range(n):
@@ -251,24 +271,30 @@ def edge_trees(zones, vertices, sidedefs, linedefs, rng):
 def place_things(zones, rng, player_start):
     things = [(player_start[0], player_start[1], player_start[2], THING_PLAYER1, SKILL_ALL)]
     for z in zones:
-        if z.kind != "clearing":
+        if z.kind not in ("clearing", "boss"):
             continue
         cx, cy = z.center
+        boss = z.kind == "boss"
+        # в логове середина свободна: боссу нужен простор (паук-мастермайнд шириной 256)
+        lo, hi, want = (0.72, 0.86, 14) if boss else (0.45, 0.78, 10)
         placed = []
         attempts = 0
-        while len(placed) < 10 and attempts < 500:
+        while len(placed) < want and attempts < 500:
             attempts += 1
             ang = rng.uniform(0, 2 * math.pi)
             # не загораживаем входы/выходы троп (оси N/E/S/W)
             if min(abs(((ang - k * math.pi / 2) + math.pi) % (2 * math.pi) - math.pi)
                    for k in range(4)) < 0.35:
                 continue
-            dist = rng.uniform(0.45, 0.78) * z.radius
+            dist = rng.uniform(lo, hi) * z.radius
             x, y = cx + dist * math.cos(ang), cy + dist * math.sin(ang)
             if any(math.hypot(x - px, y - py) < 160 for px, py in placed):
                 continue
             placed.append((x, y))
-            kind = rng.choice([THING_TREE_BIG, THING_TREE_BIG, THING_TREE_BURNT, THING_STUMP])
+            if boss:
+                kind = rng.choice([THING_TREE_BURNT, THING_TREE_BURNT, THING_STUMP])
+            else:
+                kind = rng.choice([THING_TREE_BIG, THING_TREE_BIG, THING_TREE_BURNT, THING_STUMP])
             things.append((int(x), int(y), rng.randrange(0, 360, 45), kind, SKILL_ALL))
     return things
 
@@ -297,7 +323,7 @@ def map_lumps(mapname, vertices, sectors, sidedefs, linedefs, things):
         ("REJECT", b""),
         ("BLOCKMAP", b""),
     ]
-    print(f"{mapname}: {sum(1 for x in sectors if x[6])} полян, {len(sectors)} секторов, "
+    print(f"{mapname}: {sum(1 for x in sectors if x[6])} полян (с логовом), {len(sectors)} секторов, "
           f"{len(linedefs)} линий, {len(things)} вещей, {len(b.nodes)} нод")
     return lumps
 

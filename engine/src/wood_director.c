@@ -9,8 +9,9 @@
  *    и спавнит волну врагов на «бюджет угрозы», растущий с каждой зачисткой;
  *  - когда все враги волны мертвы, открывает поляну и выдаёт награду
  *    (следующее оружие из списка, аптечку);
- *  - когда зачищены все поляны, начинается новый круг: поляны снова активны,
- *    сложность продолжает расти.
+ *  - логово босса (поляна с тегом WOOD_BOSS_TAG) заперто факелами, пока не зачищены
+ *    все обычные поляны; в логове — босс из WOODCFG со свитой;
+ *  - победа над боссом — конец забега: финальный экран со статистикой, затем титульник.
  *
  * Параметры берутся из WOODCFG (см. wad/lumps/woodcfg.txt).
  */
@@ -41,6 +42,7 @@
 #include "v_video.h"
 #include "w_wad.h"
 #include "lprintf.h"
+#include "g_game.h"
 #include "wood_director.h"
 
 #define WOOD_MAX_CLEARINGS   32
@@ -49,6 +51,9 @@
 #define WOOD_MAX_REWARDS     8
 #define WOOD_MAX_WAVE        64
 #define WOOD_MAX_BARRIER     256
+#define WOOD_MAX_BOSSES      8
+#define WOOD_BOSS_TAG        100      /* тег логова; совпадает с BOSS_TAG в gen_forest.py */
+#define WOOD_VICTORY_DELAY   (5 * TICRATE)
 
 typedef struct {
   mobjtype_t type;
@@ -60,8 +65,19 @@ typedef struct {
   sector_t *sector;
   fixed_t cx, cy;      /* центр (по габаритам) */
   fixed_t radius;      /* половина меньшей стороны габаритов */
-  dboolean cleared;    /* зачищена в текущем круге */
+  dboolean cleared;    /* зачищена */
+  dboolean boss;       /* логово босса */
 } wood_clearing_t;
+
+#define WOOD_MAX_TORCHES     128
+
+/* Огненная изгородь: линии, закрытые ML_BLOCKING, и факелы вдоль них. */
+typedef struct {
+  int lines[WOOD_MAX_BARRIER];
+  int num_lines;
+  mobj_t *torches[WOOD_MAX_TORCHES];
+  int num_torches;
+} wood_fence_t;
 
 /* --- настройки из WOODCFG --- */
 static int cfg_budget_base = 4;
@@ -73,8 +89,11 @@ static mobjtype_t cfg_weapons[WOOD_MAX_WEAPONS];
 static int cfg_num_weapons;
 static mobjtype_t cfg_rewards[WOOD_MAX_REWARDS];
 static int cfg_num_rewards;
-static mobjtype_t cfg_lap_rewards[WOOD_MAX_REWARDS];
-static int cfg_num_lap_rewards;
+static mobjtype_t cfg_gate_rewards[WOOD_MAX_REWARDS];
+static int cfg_num_gate_rewards;
+static mobjtype_t cfg_bosses[WOOD_MAX_BOSSES];
+static int cfg_num_bosses;
+static int cfg_boss_escorts = 50;     /* бюджет свиты босса, % от обычной волны */
 static mobjtype_t cfg_ammo_rewards[WOOD_MAX_REWARDS];
 static int cfg_num_ammo_rewards;
 
@@ -85,15 +104,15 @@ static int num_clearings;
 static int current = -1;              /* индекс поляны с идущим боем, -1 — боя нет */
 static mobj_t *wave[WOOD_MAX_WAVE];
 static int wave_size;
-static int barrier[WOOD_MAX_BARRIER]; /* индексы линий, закрытых на время боя */
-static int barrier_size;
-#define WOOD_MAX_TORCHES     128
+static wood_fence_t fence;            /* вокруг поляны, где идёт бой */
+static wood_fence_t gate;             /* у входа в логово, пока остальные поляны не зачищены */
 #define WOOD_TORCH_DOOMEDNUM 46       /* красный факел: видимая «огненная изгородь» */
 #define WOOD_TORCH_STEP      (40 * FRACUNIT)
-static mobj_t *torches[WOOD_MAX_TORCHES];
-static int num_torches;
+static int boss_idx = -1;             /* индекс логова в clearings, -1 — на карте его нет */
 static int waves_cleared;             /* всего зачисток за забег — ось сложности */
-static int lap;
+static int victory_tics;              /* отсчёт до финального экрана после победы */
+static dboolean run_won;              /* забег выигран: финальный экран — наш */
+static int won_waves, won_kills, won_tics;
 static unsigned int rng_state = 0;
 
 /* --- музыка --- */
@@ -164,7 +183,7 @@ static void Wood_ParseConfig(int lump)
   int pos = 0;
 
   cfg_num_monsters = cfg_num_weapons = cfg_num_rewards = 0;
-  cfg_num_lap_rewards = cfg_num_ammo_rewards = 0;
+  cfg_num_gate_rewards = cfg_num_ammo_rewards = cfg_num_bosses = 0;
   cfg_num_calm = cfg_num_battle = 0;
 
   while (pos < len)
@@ -211,8 +230,12 @@ static void Wood_ParseConfig(int lump)
       Wood_ParseTypeList(rest, cfg_weapons, &cfg_num_weapons, WOOD_MAX_WEAPONS);
     else if (!strcmp(key, "reward"))
       Wood_ParseTypeList(rest, cfg_rewards, &cfg_num_rewards, WOOD_MAX_REWARDS);
-    else if (!strcmp(key, "lap_reward"))
-      Wood_ParseTypeList(rest, cfg_lap_rewards, &cfg_num_lap_rewards, WOOD_MAX_REWARDS);
+    else if (!strcmp(key, "gate_reward"))
+      Wood_ParseTypeList(rest, cfg_gate_rewards, &cfg_num_gate_rewards, WOOD_MAX_REWARDS);
+    else if (!strcmp(key, "boss"))
+      Wood_ParseTypeList(rest, cfg_bosses, &cfg_num_bosses, WOOD_MAX_BOSSES);
+    else if (!strcmp(key, "boss_escorts"))
+      cfg_boss_escorts = BETWEEN(0, 400, atoi(rest));
     else if (!strcmp(key, "music_calm") || !strcmp(key, "music_battle"))
     {
       dboolean calm = key[6] == 'c';
@@ -242,6 +265,7 @@ static void Wood_FindClearings(void)
 {
   int s, l;
   num_clearings = 0;
+  boss_idx = -1;
   for (s = 0; s < numsectors && num_clearings < WOOD_MAX_CLEARINGS; s++)
   {
     sector_t *sec = &sectors[s];
@@ -263,6 +287,9 @@ static void Wood_FindClearings(void)
     c->cy = miny / 2 + maxy / 2;
     c->radius = MIN(maxx - minx, maxy - miny) / 2;
     c->cleared = false;
+    c->boss = sec->tag == WOOD_BOSS_TAG && boss_idx < 0;
+    if (c->boss)
+      boss_idx = num_clearings - 1;
   }
 }
 
@@ -330,7 +357,7 @@ static dboolean Wood_PickSpot(const wood_clearing_t *c, mobj_t *player, fixed_t 
 }
 
 /* Ставит факелы вдоль линии: невидимую стену делаем видимой. */
-static void Wood_PlaceTorches(const line_t *ln)
+static void Wood_PlaceTorches(wood_fence_t *f, const line_t *ln)
 {
   static mobjtype_t torch_type = NUMMOBJTYPES;
   fixed_t len = P_AproxDistance(ln->dx, ln->dy);
@@ -341,77 +368,73 @@ static void Wood_PlaceTorches(const line_t *ln)
   if (torch_type == NUMMOBJTYPES || len <= 0)
     return;
   n = len / WOOD_TORCH_STEP + 1;
-  for (k = 0; k <= n && num_torches < WOOD_MAX_TORCHES; k++)
+  for (k = 0; k <= n && f->num_torches < WOOD_MAX_TORCHES; k++)
   {
     fixed_t x = ln->v1->x + FixedMul(ln->dx, FixedDiv(k, n));
     fixed_t y = ln->v1->y + FixedMul(ln->dy, FixedDiv(k, n));
-    torches[num_torches++] = Wood_SpawnWithFog(x, y, torch_type);
+    f->torches[f->num_torches++] = Wood_SpawnWithFog(x, y, torch_type);
   }
 }
 
-static void Wood_SetBarrier(const wood_clearing_t *c, dboolean on)
+static void Wood_SetBarrier(wood_fence_t *f, const wood_clearing_t *c, dboolean on)
 {
   int i;
   if (on)
   {
-    barrier_size = 0;
-    for (i = 0; i < c->sector->linecount && barrier_size < WOOD_MAX_BARRIER; i++)
+    f->num_lines = 0;
+    for (i = 0; i < c->sector->linecount && f->num_lines < WOOD_MAX_BARRIER; i++)
     {
       line_t *ln = c->sector->lines[i];
       if (ln->backsector && !(ln->flags & ML_BLOCKING))
       {
         ln->flags |= ML_BLOCKING;
-        barrier[barrier_size++] = ln - lines;
-        Wood_PlaceTorches(ln);
+        f->lines[f->num_lines++] = ln - lines;
+        Wood_PlaceTorches(f, ln);
       }
     }
   }
   else
   {
-    for (i = 0; i < barrier_size; i++)
-      lines[barrier[i]].flags &= ~ML_BLOCKING;
-    barrier_size = 0;
-    for (i = 0; i < num_torches; i++)
+    for (i = 0; i < f->num_lines; i++)
+      lines[f->lines[i]].flags &= ~ML_BLOCKING;
+    f->num_lines = 0;
+    for (i = 0; i < f->num_torches; i++)
     {
-      mobj_t *fog = P_SpawnMobj(torches[i]->x, torches[i]->y, torches[i]->z, MT_IFOG);
+      mobj_t *fog = P_SpawnMobj(f->torches[i]->x, f->torches[i]->y, f->torches[i]->z, MT_IFOG);
       if (!i)
         S_StartSound(fog, sfx_itmbk);
-      P_RemoveMobj(torches[i]);
-      torches[i] = NULL;
+      P_RemoveMobj(f->torches[i]);
+      f->torches[i] = NULL;
     }
-    num_torches = 0;
+    f->num_torches = 0;
   }
 }
 
-static void Wood_StartWave(int idx)
+/* Спавнит врага волны на поляне и сразу натравливает на игрока. far — подальше от игрока,
+ * у противоположного края (для босса). NULL, если места не нашлось. */
+static mobj_t *Wood_SpawnFoe(const wood_clearing_t *c, mobjtype_t type, dboolean far)
 {
-  wood_clearing_t *c = &clearings[idx];
   mobj_t *pmo = players[consoleplayer].mo;
-  int budget = cfg_budget_base + cfg_budget_step * waves_cleared;
-  int guard = 0;
-  char msg[64];
+  mobj_t *mo;
+  fixed_t x, y;
+  int tries;
 
-  current = idx;
-  wave_size = 0;
-  Wood_SetBarrier(c, true);
-
-  while (budget > 0 && wave_size < cfg_max_monsters && guard++ < 256)
+  for (tries = 0; tries < (far ? 48 : 1); tries++)
   {
-    int i, pick, choices = 0;
-    int candidates[WOOD_MAX_MONSTERS];
-    fixed_t x, y;
-    mobj_t *mo;
-
-    for (i = 0; i < cfg_num_monsters; i++)
-      if (cfg_monsters[i].min_wave <= waves_cleared && cfg_monsters[i].cost <= budget)
-        candidates[choices++] = i;
-    if (!choices)
-      break;
-    pick = candidates[Wood_RandRange(0, choices - 1)];
-
-    if (!Wood_PickSpot(c, pmo, 320 * FRACUNIT, &x, &y))
+    if (far && pmo && tries < 16)
+    {
+      /* за центром поляны, если смотреть от игрока, с небольшим разбросом */
+      angle_t ang = R_PointToAngle2(pmo->x, pmo->y, c->cx, c->cy) +
+                    ((angle_t)Wood_RandRange(-0x1000, 0x1000) << 16);
+      fixed_t dist = FixedMul(c->radius, Wood_RandRange(FRACUNIT / 4, FRACUNIT / 2));
+      x = c->cx + FixedMul(dist, finecosine[ang >> ANGLETOFINESHIFT]);
+      y = c->cy + FixedMul(dist, finesine[ang >> ANGLETOFINESHIFT]);
+      if (R_PointInSubsector(x, y)->sector != c->sector)
+        continue;
+    }
+    else if (!Wood_PickSpot(c, pmo, (far ? 512 : 320) * FRACUNIT, &x, &y))
       continue;
-    mo = P_SpawnMobj(x, y, ONFLOORZ, cfg_monsters[pick].type);
+    mo = P_SpawnMobj(x, y, ONFLOORZ, type);
     if (!P_CheckPosition(mo, x, y))
     {
       P_RemoveMobj(mo);
@@ -421,8 +444,6 @@ static void Wood_StartWave(int idx)
       mobj_t *fog = P_SpawnMobj(x, y, mo->z, MT_TFOG);
       S_StartSound(fog, sfx_telept);
     }
-    budget -= cfg_monsters[pick].cost;
-
     /* сразу в бой: без засады, цель — игрок */
     mo->flags &= ~MF_AMBUSH;
     if (pmo)
@@ -435,21 +456,63 @@ static void Wood_StartWave(int idx)
     if (mo->flags & MF_COUNTKILL)
       totalkills++;
     P_SetTarget(&wave[wave_size++], mo);
+    return mo;
+  }
+  return NULL;
+}
+
+static void Wood_StartWave(int idx)
+{
+  wood_clearing_t *c = &clearings[idx];
+  int budget = cfg_budget_base + cfg_budget_step * waves_cleared;
+  int guard = 0;
+  dboolean boss_spawned = false;
+  char msg[64];
+
+  current = idx;
+  wave_size = 0;
+  Wood_SetBarrier(&fence, c, true);
+
+  if (c->boss)
+  {
+    if (cfg_num_bosses)
+      boss_spawned = Wood_SpawnFoe(c, cfg_bosses[Wood_RandRange(0, cfg_num_bosses - 1)], true) != NULL;
+    budget = budget * cfg_boss_escorts / 100;
+  }
+
+  while (budget > 0 && wave_size < cfg_max_monsters && guard++ < 256)
+  {
+    int i, pick, choices = 0;
+    int candidates[WOOD_MAX_MONSTERS];
+
+    for (i = 0; i < cfg_num_monsters; i++)
+      if (cfg_monsters[i].min_wave <= waves_cleared && cfg_monsters[i].cost <= budget)
+        candidates[choices++] = i;
+    if (!choices)
+      break;
+    pick = candidates[Wood_RandRange(0, choices - 1)];
+    if (Wood_SpawnFoe(c, cfg_monsters[pick].type, false))
+      budget -= cfg_monsters[pick].cost;
   }
 
   if (!wave_size)
   {
     /* не нашлось места — считаем поляну пустой, чтобы не запереть игрока */
-    Wood_SetBarrier(c, false);
+    Wood_SetBarrier(&fence, c, false);
     current = -1;
     c->cleared = true;
     return;
   }
 
-  lprintf(LO_INFO, "WOOD: wave %d at clearing %d, %d monsters\n",
-          waves_cleared + 1, idx + 1, wave_size);
-  sprintf(msg, "WAVE %d: %d FOES", waves_cleared + 1, wave_size);
-  Wood_Message(msg, CR_RED, sfx_bossit);
+  lprintf(LO_INFO, "WOOD: wave %d at clearing %d%s, %d monsters\n",
+          waves_cleared + 1, idx + 1, c->boss ? " (boss)" : "", wave_size);
+  if (boss_spawned)
+    Wood_Message("THE KEEPER OF THE WOOD AWAKES!", CR_RED, sfx_bossit);
+  else
+  {
+    sprintf(msg, "WAVE %d: %d FOES", waves_cleared + 1, wave_size);
+    Wood_Message(msg, CR_RED, sfx_bossit);
+  }
   Wood_BattleMusic();
 }
 
@@ -470,44 +533,70 @@ static void Wood_GiveRewards(const wood_clearing_t *c)
       Wood_SpawnWithFog(x, y, cfg_rewards[i]);
 }
 
+/* Победа над боссом: короткая пауза, потом финальный экран (F_StartFinale → WOOD_VictoryText). */
+static void Wood_Victory(void)
+{
+  player_t *p = &players[consoleplayer];
+  run_won = true;
+  victory_tics = WOOD_VICTORY_DELAY;
+  won_waves = waves_cleared;
+  won_kills = p->killcount;
+  won_tics = leveltime;
+  lprintf(LO_INFO, "WOOD: run won after %d waves\n", waves_cleared);
+  Wood_Message("THE WOOD FALLS SILENT", CR_GOLD, sfx_secret);
+}
+
+static void Wood_OpenGate(const wood_clearing_t *from)
+{
+  int i;
+  Wood_SetBarrier(&gate, &clearings[boss_idx], false);
+  for (i = 0; i < cfg_num_gate_rewards; i++)
+  {
+    fixed_t x, y;
+    if (Wood_PickSpot(from, players[consoleplayer].mo, 0, &x, &y))
+      Wood_SpawnWithFog(x, y, cfg_gate_rewards[i]);
+  }
+  lprintf(LO_INFO, "WOOD: boss lair open\n");
+  Wood_Message("THE HEART OF THE WOOD OPENS", CR_GOLD, sfx_secret);
+}
+
 static void Wood_EndWave(void)
 {
   wood_clearing_t *c = &clearings[current];
   int i, left = 0;
+  char msg[64];
 
   for (i = 0; i < wave_size; i++)
     P_SetTarget(&wave[i], NULL);
   wave_size = 0;
-  Wood_SetBarrier(c, false);
+  Wood_SetBarrier(&fence, c, false);
   c->cleared = true;
   current = -1;
   waves_cleared++;
 
+  if (c->boss)
+  {
+    Wood_Victory();
+    return;
+  }
+
   Wood_GiveRewards(c);
   Wood_CalmMusic();
-  lprintf(LO_INFO, "WOOD: wave %d cleared, lap %d\n", waves_cleared, lap + 1);
+  lprintf(LO_INFO, "WOOD: wave %d cleared\n", waves_cleared);
 
   for (i = 0; i < num_clearings; i++)
-    if (!clearings[i].cleared)
+    if (!clearings[i].cleared && !clearings[i].boss)
       left++;
 
   if (left)
   {
-    Wood_Message("CLEARING CLEARED", CR_GREEN, sfx_getpow);
-    return;
+    sprintf(msg, "CLEARING CLEARED. %d LEFT", left);
+    Wood_Message(msg, CR_GREEN, sfx_getpow);
   }
-
-  /* все поляны зачищены — новый круг */
-  lap++;
-  for (i = 0; i < num_clearings; i++)
-    clearings[i].cleared = false;
-  for (i = 0; i < cfg_num_lap_rewards; i++)
-  {
-    fixed_t x, y;
-    if (Wood_PickSpot(c, players[consoleplayer].mo, 0, &x, &y))
-      Wood_SpawnWithFog(x, y, cfg_lap_rewards[i]);
-  }
-  Wood_Message("THE FOREST GROWS ANGRIER", CR_GOLD, sfx_secret);
+  else if (boss_idx >= 0)
+    Wood_OpenGate(c);
+  else
+    Wood_Victory();   /* на карте нет логова — забег кончается на последней поляне */
 }
 
 static void Wood_SetupPlayer(player_t *p)
@@ -530,12 +619,13 @@ void WOOD_LevelStart(void)
   /* старые указатели принадлежат выгруженному уровню — просто забываем их */
   for (i = 0; i < WOOD_MAX_WAVE; i++)
     wave[i] = NULL;
-  wave_size = barrier_size = 0;
-  for (i = 0; i < WOOD_MAX_TORCHES; i++)
-    torches[i] = NULL;
-  num_torches = 0;
+  wave_size = 0;
+  memset(&fence, 0, sizeof(fence));
+  memset(&gate, 0, sizeof(gate));
   current = -1;
-  waves_cleared = lap = 0;
+  waves_cleared = 0;
+  victory_tics = 0;
+  run_won = false;
   music_started = false;
 
   wood_active = lump >= 0;
@@ -549,7 +639,12 @@ void WOOD_LevelStart(void)
   if (playeringame[consoleplayer] && players[consoleplayer].mo)
     Wood_SetupPlayer(&players[consoleplayer]);
 
-  lprintf(LO_INFO, "WOOD: director active, %d clearings\n", num_clearings);
+  /* логово заперто, пока не зачищены остальные поляны */
+  if (boss_idx >= 0)
+    Wood_SetBarrier(&gate, &clearings[boss_idx], true);
+
+  lprintf(LO_INFO, "WOOD: director active, %d clearings%s\n", num_clearings,
+          boss_idx >= 0 ? " + boss lair" : "");
 }
 
 void WOOD_Ticker(void)
@@ -560,6 +655,16 @@ void WOOD_Ticker(void)
 
   if (!wood_active || gamestate != GS_LEVEL)
     return;
+
+  if (victory_tics > 0)
+  {
+    if (!--victory_tics)
+      gameaction = ga_victory;
+    return;
+  }
+  if (run_won)
+    return;
+
   p = &players[consoleplayer];
   if (!p->mo || p->playerstate != PST_LIVE)
     return;
@@ -585,6 +690,7 @@ void WOOD_Ticker(void)
   sec = p->mo->subsector->sector;
   for (i = 0; i < num_clearings; i++)
     if (clearings[i].sector == sec && !clearings[i].cleared &&
+        (!clearings[i].boss || !gate.num_lines) &&
         /* ждём, пока игрок целиком зайдёт на поляну, иначе барьер может его зажать */
         P_AproxDistance(p->mo->x - clearings[i].cx, p->mo->y - clearings[i].cy) <
           FixedMul(clearings[i].radius, FRACUNIT * 17 / 20))
@@ -620,4 +726,31 @@ int WOOD_PickRunMap(int current)
     pick = pick % count + 1;
   lprintf(LO_INFO, "WOOD: new run on MAP%02d of %d layouts\n", pick, count);
   return pick;
+}
+
+int WOOD_RunWon(void)
+{
+  return wood_active && run_won;
+}
+
+const char *WOOD_VictoryText(void)
+{
+  static char text[512];
+  int secs = won_tics / TICRATE;
+  sprintf(text,
+          "THE KEEPER OF THE WOOD HAS FALLEN.\n"
+          "THE TREES GO QUIET... FOR NOW.\n"
+          "\n"
+          "CLEARINGS TAMED: %d\n"
+          "FOES FELLED: %d\n"
+          "TIME IN THE WOOD: %d:%02d\n"
+          "\n"
+          "PRESS FIRE TO LEAVE THE FOREST.",
+          won_waves, won_kills, secs / 60, secs % 60);
+  return text;
+}
+
+void WOOD_EndRun(void)
+{
+  run_won = false;
 }

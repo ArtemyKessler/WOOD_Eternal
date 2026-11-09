@@ -14,4 +14,11 @@ int WOOD_Enabled(void);
 /* Случайная раскладка леса для нового забега: номер карты 1..N, не равный current. */
 int WOOD_PickRunMap(int current);
 
+/* Забег выигран (босс повержен): финальный экран показывает WOOD_VictoryText. */
+int WOOD_RunWon(void);
+const char *WOOD_VictoryText(void);
+
+/* Финальный экран закрыт — забег окончен. */
+void WOOD_EndRun(void);
+
 #endif
