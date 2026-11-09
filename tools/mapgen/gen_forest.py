@@ -30,12 +30,12 @@ FLOOR_H, CEIL_H = 0, 256
 THING_PLAYER1 = 1
 THING_TREE_BIG = 54      # TRE2, большое дерево (радиус 32)
 THING_TREE_BURNT = 43    # TRE1, обгоревшее дерево (радиус 16)
-THING_STUMP = 47         # SMIT, пень (радиус 16)
+THING_STUMP = 47         # SMIT: в Doom пень, во Freedoom маленькое деревце (радиус 16)
 SKILL_ALL = 0x0007
 
 PATH_HALF_WIDTH = 128
 
-# Плотность леса. Деревья (кроме пней) можно спилить бензопилой — см. saw_trees в WOODCFG.
+# Плотность леса. Деревья можно спилить бензопилой — см. saw_trees в WOODCFG.
 CLEARING_TREES = 16      # отдельных деревьев внутри поляны
 EDGE_ROW2_STEP = 176     # второй ряд опушки на полянах: шаг вдоль стены
 EDGE_ROW2_INSET = 120    # и отступ от стены
