@@ -32,6 +32,10 @@ jobs:
             ~/emsdk
             build/cache
           key: wood-${{ env.EMSDK_VERSION }}-${{ hashFiles('tools/build.sh') }}
+          # при изменении build.sh берём прошлый кэш: иначе Freedoom качается заново,
+          # а загрузки релизов GitHub иногда отвечают 504
+          restore-keys: |
+            wood-${{ env.EMSDK_VERSION }}-
 
       - name: Install emsdk
         run: |
