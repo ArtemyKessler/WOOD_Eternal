@@ -35,7 +35,7 @@
 ## Сборка (Linux / WSL)
 
 Нужны: [emsdk](https://emscripten.org/docs/getting_started/downloads.html), `cmake`, `gcc`,
-`libsdl2-dev`, `python3`, `curl`, `unzip`.
+`libsdl2-dev`, `python3` с Pillow, шрифт DejaVu, `curl`, `unzip`.
 
 ```sh
 source ~/emsdk/emsdk_env.sh
