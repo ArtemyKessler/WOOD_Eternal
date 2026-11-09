@@ -41,6 +41,7 @@
 #include "sounds.h"
 #include "hu_stuff.h"
 #include "v_video.h"
+#include "r_patch.h"
 #include "w_wad.h"
 #include "lprintf.h"
 #include "wood_director.h"
@@ -685,6 +686,54 @@ static void Wood_SetupPlayer(player_t *p)
   P_SetupPsprites(p);
 }
 
+/* Экран смерти: сколько тиков игрок мёртв и отпущена ли кнопка после смерти
+ * (чтобы пробел, зажатый в бою, не перезапускал забег мгновенно). */
+#define WOOD_AGAIN_DELAY (TICRATE * 3 / 4)
+static int dead_tics;
+static dboolean again_armed;
+
+int WOOD_DeathThink(player_t *player)
+{
+  if (dead_tics < WOOD_AGAIN_DELAY)
+  {
+    dead_tics++;
+    return false;
+  }
+  if (!(player->cmd.buttons & BT_USE))
+  {
+    again_armed = true;
+    return false;
+  }
+  return again_armed;
+}
+
+void WOOD_Drawer(void)
+{
+  static int lump_again = -2, lump_keys = -2;
+  player_t *p = &players[displayplayer];
+  int w;
+
+  if (!wood_active || gamestate != GS_LEVEL || p->playerstate != PST_DEAD ||
+      dead_tics < WOOD_AGAIN_DELAY || menuactive)
+    return;
+  if (lump_again == -2)
+  {
+    lump_again = W_CheckNumForName("WAGAIN");
+    lump_keys = W_CheckNumForName("WAGAINK");
+  }
+  if (lump_again >= 0)
+  {
+    w = R_NumPatchWidth(lump_again);
+    V_DrawNumPatch((320 - w) / 2, 64, 0, lump_again, CR_DEFAULT, VPT_STRETCH);
+  }
+  /* подсказка мигает: секунду видна, полсекунды нет */
+  if (lump_keys >= 0 && (gametic % (TICRATE * 3 / 2)) < TICRATE)
+  {
+    w = R_NumPatchWidth(lump_keys);
+    V_DrawNumPatch((320 - w) / 2, 118, 0, lump_keys, CR_DEFAULT, VPT_STRETCH);
+  }
+}
+
 void WOOD_LevelStart(void)
 {
   int lump = W_CheckNumForName("WOODCFG");
@@ -700,6 +749,8 @@ void WOOD_LevelStart(void)
   current = -1;
   waves_cleared = lap = 0;
   music_started = false;
+  dead_tics = 0;
+  again_armed = false;
 
   wood_active = lump >= 0;
   if (!wood_active)

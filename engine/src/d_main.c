@@ -81,6 +81,7 @@
 #include "r_main.h"
 #include "r_fps.h"
 #include "d_main.h"
+#include "wood_director.h"
 #include "d_deh.h"  // Ty 04/08/98 - Externalizations
 #include "lprintf.h"  // jff 08/03/98 - declaration of lprintf
 #include "am_map.h"
@@ -486,6 +487,7 @@ void D_Display (fixed_t frac)
     if (V_GetMode() != VID_MODEGL)
       R_DrawViewBorder();
     HU_Drawer();
+    WOOD_Drawer();                  // WOOD: «Again?» после смерти
 
 #ifdef GL_DOOM
     if (V_GetMode() == VID_MODEGL)

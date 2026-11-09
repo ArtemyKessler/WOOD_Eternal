@@ -614,7 +614,10 @@ void G_BuildTiccmd(ticcmd_t* cmd)
     cmd->buttons |= BT_ATTACK;
 
   if (gamekeydown[key_use] || mousebuttons[mousebuse] ||
-      joybuttons[joybuse])
+      joybuttons[joybuse] ||
+      // WOOD: на экране «Again?» Enter работает так же, как пробел
+      (WOOD_Enabled() && players[consoleplayer].playerstate == PST_DEAD &&
+       (gamekeydown[KEYD_ENTER] || gamekeydown[KEYD_KEYPADENTER])))
     {
       cmd->buttons |= BT_USE;
       // clear double clicks if hit use button

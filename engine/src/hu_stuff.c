@@ -35,6 +35,7 @@
 
 #include "doomstat.h"
 #include "hu_stuff.h"
+#include "wood_director.h"
 #include "hu_lib.h"
 #include "hu_tracers.h"
 #include "st_stuff.h" /* jff 2/16/98 need loc of status bar */
@@ -2987,7 +2988,9 @@ dboolean HU_Responder(event_t *ev)
 
   if (!chat_on)
   {
-    if (!console_on && ev->data1 == key_enter)                                 // phares
+    if (!console_on && ev->data1 == key_enter &&                              // phares
+        // WOOD: на экране «Again?» Enter перезапускает забег, а не листает сообщения
+        !(WOOD_Enabled() && players[consoleplayer].playerstate == PST_DEAD))
     {
 #ifndef INSTRUMENTED  // never turn on message review if INSTRUMENTED defined
       if (hud_msg_lines>1)  // it posts multi-line messages that will trash
