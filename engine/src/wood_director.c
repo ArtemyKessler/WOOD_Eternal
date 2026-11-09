@@ -94,11 +94,29 @@ static mobj_t *torches[WOOD_MAX_TORCHES];
 static int num_torches;
 static int waves_cleared;             /* всего зачисток за забег — ось сложности */
 static int lap;
-static unsigned int rng_state = 1;
+static unsigned int rng_state = 0;
+
+/* --- музыка --- */
+#define WOOD_MAX_TRACKS 16
+static char cfg_music_calm[WOOD_MAX_TRACKS][9];
+static int cfg_num_calm;
+static char cfg_music_battle[WOOD_MAX_TRACKS][9];
+static int cfg_num_battle;
+static int last_calm = -1, last_battle = -1;
+static dboolean music_started;
+
+static void Wood_Seed(void)
+{
+  rng_state = (unsigned int)time(NULL) ^ ((unsigned int)clock() << 11) ^ 0x9E3779B9u;
+  if (!rng_state)
+    rng_state = 1;
+}
 
 /* Свой генератор: P_Random() нельзя трогать, он отвечает за синхронизацию демо. */
 static unsigned int Wood_Rand(void)
 {
+  if (!rng_state)
+    Wood_Seed();
   rng_state ^= rng_state << 13;
   rng_state ^= rng_state >> 17;
   rng_state ^= rng_state << 5;
@@ -147,6 +165,7 @@ static void Wood_ParseConfig(int lump)
 
   cfg_num_monsters = cfg_num_weapons = cfg_num_rewards = 0;
   cfg_num_lap_rewards = cfg_num_ammo_rewards = 0;
+  cfg_num_calm = cfg_num_battle = 0;
 
   while (pos < len)
   {
@@ -194,6 +213,23 @@ static void Wood_ParseConfig(int lump)
       Wood_ParseTypeList(rest, cfg_rewards, &cfg_num_rewards, WOOD_MAX_REWARDS);
     else if (!strcmp(key, "lap_reward"))
       Wood_ParseTypeList(rest, cfg_lap_rewards, &cfg_num_lap_rewards, WOOD_MAX_REWARDS);
+    else if (!strcmp(key, "music_calm") || !strcmp(key, "music_battle"))
+    {
+      dboolean calm = key[6] == 'c';
+      char buf[256], *tok;
+      strncpy(buf, rest, sizeof(buf) - 1);
+      buf[sizeof(buf) - 1] = 0;
+      for (tok = strtok(buf, " \t\r"); tok; tok = strtok(NULL, " \t\r"))
+      {
+        int *cnt = calm ? &cfg_num_calm : &cfg_num_battle;
+        char (*list)[9] = calm ? cfg_music_calm : cfg_music_battle;
+        if (*cnt >= WOOD_MAX_TRACKS || W_CheckNumForName(tok) < 0)
+          continue;
+        strncpy(list[*cnt], tok, 8);
+        list[*cnt][8] = 0;
+        (*cnt)++;
+      }
+    }
     else if (!strcmp(key, "ammo_reward"))
       Wood_ParseTypeList(rest, cfg_ammo_rewards, &cfg_num_ammo_rewards, WOOD_MAX_REWARDS);
   }
@@ -228,6 +264,34 @@ static void Wood_FindClearings(void)
     c->radius = MIN(maxx - minx, maxy - miny) / 2;
     c->cleared = false;
   }
+}
+
+/* Случайный трек из списка, не повторяя предыдущий. */
+static void Wood_PlayFrom(char (*list)[9], int count, int *last)
+{
+  int pick, lump;
+  if (count <= 0)
+    return;
+  pick = Wood_RandRange(0, count - 1);
+  if (count > 1 && pick == *last)
+    pick = (pick + 1 + Wood_RandRange(0, count - 2)) % count;
+  *last = pick;
+  lump = W_CheckNumForName(list[pick]);
+  if (lump >= 0)
+  {
+    lprintf(LO_INFO, "WOOD: music %s\n", list[pick]);
+    S_ChangeMusInfoMusic(lump, true);
+  }
+}
+
+static void Wood_CalmMusic(void)
+{
+  Wood_PlayFrom(cfg_music_calm, cfg_num_calm, &last_calm);
+}
+
+static void Wood_BattleMusic(void)
+{
+  Wood_PlayFrom(cfg_music_battle, cfg_num_battle, &last_battle);
 }
 
 static void Wood_Message(const char *msg, int color, int sfx)
@@ -386,6 +450,7 @@ static void Wood_StartWave(int idx)
           waves_cleared + 1, idx + 1, wave_size);
   sprintf(msg, "WAVE %d: %d FOES", waves_cleared + 1, wave_size);
   Wood_Message(msg, CR_RED, sfx_bossit);
+  Wood_BattleMusic();
 }
 
 static void Wood_GiveRewards(const wood_clearing_t *c)
@@ -419,6 +484,7 @@ static void Wood_EndWave(void)
   waves_cleared++;
 
   Wood_GiveRewards(c);
+  Wood_CalmMusic();
   lprintf(LO_INFO, "WOOD: wave %d cleared, lap %d\n", waves_cleared, lap + 1);
 
   for (i = 0; i < num_clearings; i++)
@@ -470,6 +536,7 @@ void WOOD_LevelStart(void)
   num_torches = 0;
   current = -1;
   waves_cleared = lap = 0;
+  music_started = false;
 
   wood_active = lump >= 0;
   if (!wood_active)
@@ -477,9 +544,7 @@ void WOOD_LevelStart(void)
 
   Wood_ParseConfig(lump);
   Wood_FindClearings();
-  rng_state = (unsigned int)time(NULL) ^ ((unsigned int)clock() << 11) ^ 0x9E3779B9u;
-  if (!rng_state)
-    rng_state = 1;
+  Wood_Seed();
 
   if (playeringame[consoleplayer] && players[consoleplayer].mo)
     Wood_SetupPlayer(&players[consoleplayer]);
@@ -498,6 +563,13 @@ void WOOD_Ticker(void)
   p = &players[consoleplayer];
   if (!p->mo || p->playerstate != PST_LIVE)
     return;
+
+  /* музыку уровня движок включает после P_SetupLevel, поэтому перебиваем её на первом тике */
+  if (!music_started)
+  {
+    music_started = true;
+    Wood_CalmMusic();
+  }
 
   if (current >= 0)
   {
@@ -520,4 +592,32 @@ void WOOD_Ticker(void)
       Wood_StartWave(i);
       break;
     }
+}
+
+int WOOD_Enabled(void)
+{
+  static int enabled = -1;
+  if (enabled < 0)
+    enabled = W_CheckNumForName("WOODCFG") >= 0;
+  return enabled;
+}
+
+int WOOD_PickRunMap(int current)
+{
+  int count = 0, pick;
+  char name[9];
+  while (count < 99)
+  {
+    sprintf(name, "MAP%02d", count + 1);
+    if (W_CheckNumForName(name) < 0)
+      break;
+    count++;
+  }
+  if (count <= 1)
+    return 1;
+  pick = Wood_RandRange(1, count);
+  if (pick == current)
+    pick = pick % count + 1;
+  lprintf(LO_INFO, "WOOD: new run on MAP%02d of %d layouts\n", pick, count);
+  return pick;
 }

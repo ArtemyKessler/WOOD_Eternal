@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Рисует графику WOOD: титульный экран TITLEPIC и логотип меню M_DOOM.
+"""Рисует графику WOOD: титульный экран TITLEPIC, логотип меню M_DOOM и лесное небо RSKY1.
 
 Картинки рисуются Pillow, приводятся к палитре PLAYPAL из freedoom2.wad и сохраняются
 в формате Doom picture. Шрифт — DejaVu Sans Bold (лицензия позволяет встраивать
@@ -155,6 +155,72 @@ def make_titlepic(pal):
     return doom_picture(to_palette(img, pal)), img
 
 
+SKY_RAMP = [11, 10, 9, 159, 158, 157, 156, 155, 154, 153, 152]  # тёмно-оливковый -> светлая дымка
+BAYER4 = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]]
+
+
+def make_sky(pal, seed=11):
+    """Лесное небо 256x128 (патч RSKY1 текстуры SKY1), бесшовное по горизонтали.
+
+    Рисуется прямо индексами палитры: оливковая вечерняя дымка (градиент с упорядоченным
+    дизерингом, иначе Freedoom-палитра превращает её в серое), облака и два слоя елей.
+    Нижний край текстуры совпадает с горизонтом, поэтому деревья стоят «на земле».
+    """
+    w, h = 256, 128
+    rnd = random.Random(seed)
+    last = len(SKY_RAMP) - 1
+
+    def ramp(pos, x, y):
+        pos = max(0.0, min(last, pos))
+        base = int(pos)
+        frac = pos - base
+        step = 1 if frac * 16 > BAYER4[y % 4][x % 4] + 0.5 else 0
+        return SKY_RAMP[min(last, base + step)]
+
+    rows = [[ramp(last * (y / (h - 1)) ** 1.3, x, y) for x in range(w)] for y in range(h)]
+
+    # облака: вытянутые эллипсы на 2 ступени светлее неба вокруг
+    for _ in range(9):
+        cx, cy = rnd.randint(0, w - 1), rnd.randint(8, 56)
+        rw, rh = rnd.randint(20, 46), rnd.randint(3, 7)
+        for y in range(cy - rh, cy + rh + 1):
+            for dx in range(-rw, rw + 1):
+                if (dx / rw) ** 2 + ((y - cy) / rh) ** 2 <= 1:
+                    x = (cx + dx) % w
+                    rows[y][x] = ramp(last * (y / (h - 1)) ** 1.3 + 2.5, x, y)
+
+    # два слоя елей: дальний — серо-зелёный, ближний — почти чёрный
+    layers = []
+    for color, count, hmin, hmax in ((157, 34, 22, 40), (12, 24, 34, 62)):
+        mask = Image.new("L", (w * 3, h), 0)
+        d = ImageDraw.Draw(mask)
+        for _ in range(count):
+            x = rnd.randint(0, w - 1) + w
+            height = rnd.randint(hmin, hmax)
+            half = max(4, height // 4)
+            for k in range(3):  # ярусы ели
+                top = h - height + k * height // 4
+                base = h - height // 3 + k * height // 6
+                hw = half * (k + 2) // 3
+                for dx in (-w, 0, w):
+                    d.polygon([(x + dx, top), (x + dx - hw, base), (x + dx + hw, base)], fill=255)
+            for dx in (-w, 0, w):
+                d.rectangle([x + dx - half, h - height // 3, x + dx + half, h], fill=255)
+        layers.append((color, mask.crop((w, 0, 2 * w, h)).load()))
+    for color, m in layers:
+        for y in range(h):
+            for x in range(w):
+                if m[x, y]:
+                    rows[y][x] = color
+
+    img = Image.new("RGB", (w, h))
+    px = img.load()
+    for y in range(h):
+        for x in range(w):
+            px[x, y] = pal[rows[y][x]]
+    return doom_picture(rows), img
+
+
 def make_menu_logo(pal):
     logo = wood_text(48, "WOOD")
     # меню рисует M_DOOM по центру сверху; смещение 0,0 как у оригинала
@@ -169,10 +235,13 @@ def main():
     menu, menu_img = make_menu_logo(pal)
     open(os.path.join(out_dir, "titlepic.lmp"), "wb").write(title)
     open(os.path.join(out_dir, "m_doom.lmp"), "wb").write(menu)
+    sky, sky_img = make_sky(pal)
+    open(os.path.join(out_dir, "rsky1.lmp"), "wb").write(sky)
     preview_dir = out_dir.rstrip("/") + "-preview"
     os.makedirs(preview_dir, exist_ok=True)
     title_img.save(os.path.join(preview_dir, "titlepic.png"))
     menu_img.save(os.path.join(preview_dir, "m_doom.png"))
+    sky_img.resize((1024, 512), Image.NEAREST).save(os.path.join(preview_dir, "rsky1.png"))
     print(f"title: TITLEPIC {len(title)} B, M_DOOM {menu_img.size}")
 
 
