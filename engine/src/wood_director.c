@@ -11,7 +11,9 @@
  *    (следующее оружие из списка, аптечку);
  *  - логово босса (поляна с тегом WOOD_BOSS_TAG) заперто факелами, пока не зачищены
  *    все обычные поляны; в логове — босс из WOODCFG со свитой;
- *  - победа над боссом — конец забега: финальный экран со статистикой, затем титульник.
+ *  - победа над боссом — конец забега: финальный экран со статистикой, затем титульник;
+ *  - деревья можно спилить бензопилой (WOOD_SawTree): спиленное дерево исчезает
+ *    и роняет немного патронов (на его месте можно оставить saw_stump).
  *
  * Параметры берутся из WOODCFG (см. wad/lumps/woodcfg.txt).
  */
@@ -96,6 +98,15 @@ static int cfg_num_bosses;
 static int cfg_boss_escorts = 50;     /* бюджет свиты босса, % от обычной волны */
 static mobjtype_t cfg_ammo_rewards[WOOD_MAX_REWARDS];
 static int cfg_num_ammo_rewards;
+
+/* --- пила по деревьям --- */
+#define WOOD_MAX_SAW_TREES   8
+static mobjtype_t cfg_saw_trees[WOOD_MAX_SAW_TREES];
+static int cfg_num_saw_trees;
+static int cfg_saw_tree_health = 120;
+static mobjtype_t cfg_saw_stump = NUMMOBJTYPES;
+static mobjtype_t cfg_saw_drops[WOOD_MAX_REWARDS];
+static int cfg_num_saw_drops;
 
 /* --- состояние забега (сбрасывается при каждой загрузке уровня, в т.ч. после смерти) --- */
 static dboolean wood_active;
@@ -185,6 +196,8 @@ static void Wood_ParseConfig(int lump)
   cfg_num_monsters = cfg_num_weapons = cfg_num_rewards = 0;
   cfg_num_gate_rewards = cfg_num_ammo_rewards = cfg_num_bosses = 0;
   cfg_num_calm = cfg_num_battle = 0;
+  cfg_num_saw_trees = cfg_num_saw_drops = 0;
+  cfg_saw_stump = NUMMOBJTYPES;
 
   while (pos < len)
   {
@@ -255,6 +268,14 @@ static void Wood_ParseConfig(int lump)
     }
     else if (!strcmp(key, "ammo_reward"))
       Wood_ParseTypeList(rest, cfg_ammo_rewards, &cfg_num_ammo_rewards, WOOD_MAX_REWARDS);
+    else if (!strcmp(key, "saw_trees"))
+      Wood_ParseTypeList(rest, cfg_saw_trees, &cfg_num_saw_trees, WOOD_MAX_SAW_TREES);
+    else if (!strcmp(key, "saw_tree_health"))
+      cfg_saw_tree_health = MAX(1, atoi(rest));
+    else if (!strcmp(key, "saw_stump"))
+      cfg_saw_stump = Wood_TypeForDoomednum(atoi(rest));
+    else if (!strcmp(key, "saw_drop"))
+      Wood_ParseTypeList(rest, cfg_saw_drops, &cfg_num_saw_drops, WOOD_MAX_REWARDS);
   }
   W_UnlockLumpNum(lump);
   lprintf(LO_INFO, "WOOD: %d monster types, %d weapons in WOODCFG\n",
@@ -599,6 +620,148 @@ static void Wood_EndWave(void)
     Wood_Victory();   /* на карте нет логова — забег кончается на последней поляне */
 }
 
+/* ------------------------------------------------------------------------ */
+/* Пила по деревьям                                                         */
+/* ------------------------------------------------------------------------ */
+
+static dboolean Wood_IsSawTree(const mobj_t *mo)
+{
+  int i;
+  for (i = 0; i < cfg_num_saw_trees; i++)
+    if (mo->type == cfg_saw_trees[i])
+      return true;
+  return false;
+}
+
+/* Деревья не стреляемые, их health движок не трогает — храним в нём «прочность». */
+static void Wood_InitTrees(void)
+{
+  thinker_t *th;
+  int n = 0;
+  for (th = thinkercap.next; th != &thinkercap; th = th->next)
+  {
+    mobj_t *mo;
+    if (th->function != P_MobjThinker)
+      continue;
+    mo = (mobj_t *)th;
+    if (Wood_IsSawTree(mo))
+    {
+      mo->health = cfg_saw_tree_health;
+      n++;
+    }
+  }
+  lprintf(LO_INFO, "WOOD: %d sawable trees\n", n);
+}
+
+/* Тип патронов предмета-ящика (по спрайту), или NUMAMMO. */
+static ammotype_t Wood_AmmoOfItem(mobjtype_t t)
+{
+  switch (states[mobjinfo[t].spawnstate].sprite)
+  {
+    case SPR_CLIP: case SPR_AMMO: return am_clip;
+    case SPR_SHEL: case SPR_SBOX: return am_shell;
+    case SPR_ROCK: case SPR_BROK: return am_misl;
+    case SPR_CELL: case SPR_CELP: return am_cell;
+    default: return NUMAMMO;
+  }
+}
+
+/* Что выпадет из дерева: патроны к оружию, которое у игрока есть (кроме пилы и кулака).
+ * Если стрелять пока не из чего — любые из списка, пригодятся. */
+static mobjtype_t Wood_PickSawDrop(const player_t *p)
+{
+  mobjtype_t useful[WOOD_MAX_REWARDS];
+  int i, w, n = 0;
+  if (!cfg_num_saw_drops)
+    return NUMMOBJTYPES;
+  for (i = 0; i < cfg_num_saw_drops; i++)
+  {
+    ammotype_t a = Wood_AmmoOfItem(cfg_saw_drops[i]);
+    for (w = 0; w < NUMWEAPONS; w++)
+      if (p->weaponowned[w] && weaponinfo[w].ammo == a && a != am_noammo)
+      {
+        useful[n++] = cfg_saw_drops[i];
+        break;
+      }
+  }
+  if (n)
+    return useful[Wood_RandRange(0, n - 1)];
+  return cfg_saw_drops[Wood_RandRange(0, cfg_num_saw_drops - 1)];
+}
+
+static void Wood_FellTree(player_t *p, mobj_t *tree)
+{
+  fixed_t x = tree->x, y = tree->y;
+  angle_t away = R_PointToAngle2(p->mo->x, p->mo->y, x, y);
+  mobjtype_t drop = Wood_PickSawDrop(p);
+  mobj_t *mo;
+
+  S_StartSound(tree, sfx_bdcls);   /* глухой удар — дерево падает */
+  P_RemoveMobj(tree);
+  if (cfg_saw_stump != NUMMOBJTYPES)
+    P_SpawnMobj(x, y, ONFLOORZ, cfg_saw_stump);
+
+  if (drop != NUMMOBJTYPES)
+  {
+    /* патроны кладём между пнём и игроком, чтобы не застряли за стволом */
+    fixed_t back = 24 * FRACUNIT;
+    mo = P_SpawnMobj(x - FixedMul(back, finecosine[away >> ANGLETOFINESHIFT]),
+                     y - FixedMul(back, finesine[away >> ANGLETOFINESHIFT]),
+                     ONFLOORZ, drop);
+    mo->flags |= MF_DROPPED;   /* как из убитого врага: половина обычного */
+    P_SpawnMobj(mo->x, mo->y, mo->z, MT_IFOG);
+  }
+  lprintf(LO_INFO, "WOOD: tree felled, drop %d\n", drop);
+  if (current < 0)
+    Wood_Message("TIMBER!", CR_GOLD, 0);
+}
+
+dboolean WOOD_SawTree(player_t *p, angle_t angle, int damage)
+{
+  thinker_t *th;
+  mobj_t *best = NULL;
+  fixed_t best_dist = INT_MAX;
+  mobj_t *pmo = p->mo;
+
+  if (!wood_active || !cfg_num_saw_trees || !pmo)
+    return false;
+
+  for (th = thinkercap.next; th != &thinkercap; th = th->next)
+  {
+    mobj_t *mo;
+    fixed_t dist;
+    angle_t diff;
+    if (th->function != P_MobjThinker)
+      continue;
+    mo = (mobj_t *)th;
+    if (!Wood_IsSawTree(mo))
+      continue;
+    dist = P_AproxDistance(mo->x - pmo->x, mo->y - pmo->y);
+    if (dist - mo->radius > MELEERANGE + 8 * FRACUNIT || dist >= best_dist)
+      continue;
+    diff = R_PointToAngle2(pmo->x, pmo->y, mo->x, mo->y) - angle;
+    if (diff > ANG45 / 2 && diff < (angle_t)-(ANG45 / 2))
+      continue;
+    best = mo;
+    best_dist = dist;
+  }
+  if (!best || !P_CheckSight(pmo, best))
+    return false;
+
+  /* опилки из ствола со стороны игрока */
+  {
+    angle_t a = R_PointToAngle2(best->x, best->y, pmo->x, pmo->y);
+    P_SpawnPuff(best->x + FixedMul(best->radius, finecosine[a >> ANGLETOFINESHIFT]),
+                best->y + FixedMul(best->radius, finesine[a >> ANGLETOFINESHIFT]),
+                pmo->z + 32 * FRACUNIT);
+  }
+
+  best->health -= damage;
+  if (best->health <= 0)
+    Wood_FellTree(p, best);
+  return true;
+}
+
 static void Wood_SetupPlayer(player_t *p)
 {
   int i;
@@ -634,6 +797,7 @@ void WOOD_LevelStart(void)
 
   Wood_ParseConfig(lump);
   Wood_FindClearings();
+  Wood_InitTrees();
   Wood_Seed();
 
   if (playeringame[consoleplayer] && players[consoleplayer].mo)
