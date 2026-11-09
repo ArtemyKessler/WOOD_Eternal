@@ -8,6 +8,7 @@ import math
 import struct
 
 EPS = 1e-6
+SNAP = 0.75
 
 
 class Seg:
@@ -21,7 +22,9 @@ class Seg:
 def _side(px, py, x, y, dx, dy):
     """>0 — справа (front в терминах Doom), <0 — слева, 0 — на линии."""
     v = dy * (px - x) - dx * (py - y)
-    if abs(v) < EPS * max(1.0, math.hypot(dx, dy)):
+    # точки разреза округляются до целых (так их пишет VERTEXES), поэтому всё, что ближе
+    # SNAP юнита к линии, считаем лежащим на ней — иначе косые линии режутся бесконечно
+    if abs(v) < SNAP * max(1.0, math.hypot(dx, dy)):
         return 0.0
     return v
 

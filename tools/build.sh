@@ -22,10 +22,11 @@ echo "$FREEDOOM_SHA256  $FD_ZIP" | sha256sum -c -
 unzip -o -q -j "$FD_ZIP" "freedoom-$FREEDOOM_VER/freedoom2.wad" -d "$CACHE"
 
 # 2. Карты (16 случайных раскладок леса MAP01..MAP16, ноды строит наш nodebuild.py),
-#    графика (титул, логотип, лесное небо) и урезанный IWAD.
+#    графика (титул, логотип, лесное небо, лесной декор) и урезанный IWAD.
 python3 "$ROOT/tools/mapgen/gen_forest.py" "$CACHE/maps.wad" 16
 python3 "$ROOT/tools/make_title.py" "$CACHE/freedoom2.wad" "$CACHE/gfx"
-python3 -I "$ROOT/tools/build_iwad.py" "$CACHE/freedoom2.wad" "$ROOT/wad/lumps:$CACHE/gfx" "$CACHE/maps.wad" "$CACHE/wood.wad"
+python3 "$ROOT/tools/make_decor.py" "$CACHE/freedoom2.wad" "$CACHE/decor"
+python3 -I "$ROOT/tools/build_iwad.py" "$CACHE/freedoom2.wad" "$ROOT/wad/lumps:$CACHE/gfx:$CACHE/decor" "$CACHE/maps.wad" "$CACHE/wood.wad"
 
 # 3. prboomx.wad — служебный WAD движка, собирается нативной сборкой.
 if [ ! -f "$CACHE/prboomx.wad" ]; then
