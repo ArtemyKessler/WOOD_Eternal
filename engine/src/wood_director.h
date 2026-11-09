@@ -2,6 +2,8 @@
 #ifndef __WOOD_DIRECTOR__
 #define __WOOD_DIRECTOR__
 
+#include "d_player.h"
+
 /* Вызывается в конце P_SetupLevel: сброс забега, разбор WOODCFG, стартовое оружие. */
 void WOOD_LevelStart(void);
 
@@ -21,5 +23,8 @@ int WOOD_DeathThink(struct player_s *player);
 
 /* Рисует «Again?» поверх экрана, пока игрок мёртв. Вызывается из D_Display после HU_Drawer. */
 void WOOD_Drawer(void);
+/* Бензопила не задела врага: если перед игроком дерево из saw_trees, пилим его.
+ * Возвращает true, если пила попала в дерево. */
+dboolean WOOD_SawTree(player_t *p, angle_t angle, int damage);
 
 #endif
