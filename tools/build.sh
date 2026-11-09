@@ -15,7 +15,7 @@ mkdir -p "$CACHE"
 # 1. Freedoom (BSD-3) — источник ресурсов.
 FD_ZIP="$CACHE/freedoom-$FREEDOOM_VER.zip"
 if [ ! -f "$FD_ZIP" ]; then
-  curl -fsSL -o "$FD_ZIP" \
+  curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o "$FD_ZIP" \
     "https://github.com/freedoom/freedoom/releases/download/v$FREEDOOM_VER/freedoom-$FREEDOOM_VER.zip"
 fi
 echo "$FREEDOOM_SHA256  $FD_ZIP" | sha256sum -c -
