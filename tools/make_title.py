@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Рисует графику WOOD: титульный экран TITLEPIC, логотип меню M_DOOM и лесное небо RSKY1.
+"""Рисует графику WOOD: титульный экран TITLEPIC, логотип меню M_DOOM, лесное небо RSKY1
+и экран смерти: надпись WAGAIN («Again?») с подсказкой WAGAINK.
 
 Картинки рисуются Pillow, приводятся к палитре PLAYPAL из freedoom2.wad и сохраняются
 в формате Doom picture. Шрифт — DejaVu Sans Bold (лицензия позволяет встраивать
@@ -239,6 +240,28 @@ def make_menu_logo(pal):
     return doom_picture(to_palette(logo, pal), left=MENU_LOGO_X - x), logo
 
 
+def hint_text(size, text, color=(230, 215, 170)):
+    """Мелкая светлая надпись с тёмной обводкой, RGBA."""
+    f = font(size)
+    bbox = f.getbbox(text)
+    w, h = bbox[2] - bbox[0] + 6, bbox[3] - bbox[1] + 6
+    mask = Image.new("L", (w, h), 0)
+    ImageDraw.Draw(mask).text((3 - bbox[0], 3 - bbox[1]), text, font=f, fill=255)
+    out = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    out.paste(Image.new("RGBA", (w, h), OUTLINE + (255,)), (0, 0), mask.filter(ImageFilter.MaxFilter(3)))
+    out.paste(Image.new("RGBA", (w, h), color + (255,)), (0, 0), mask)
+    return out
+
+
+def make_again(pal):
+    """Экран смерти: «Again?» деревянными буквами и подсказка с клавишами.
+    Движок рисует их по центру экрана 320x200 (см. WOOD_Drawer в wood_director.c)."""
+    again = wood_text(40, "Again?", grain_seed=3)
+    keys = hint_text(10, "SPACE / ENTER")
+    return (doom_picture(to_palette(again, pal)), again,
+            doom_picture(to_palette(keys, pal)), keys)
+
+
 def main():
     src, out_dir = sys.argv[1:3]
     os.makedirs(out_dir, exist_ok=True)
@@ -249,11 +272,16 @@ def main():
     open(os.path.join(out_dir, "m_doom.lmp"), "wb").write(menu)
     sky, sky_img = make_sky(pal)
     open(os.path.join(out_dir, "rsky1.lmp"), "wb").write(sky)
+    again, again_img, keys, keys_img = make_again(pal)
+    open(os.path.join(out_dir, "wagain.lmp"), "wb").write(again)
+    open(os.path.join(out_dir, "wagaink.lmp"), "wb").write(keys)
     preview_dir = out_dir.rstrip("/") + "-preview"
     os.makedirs(preview_dir, exist_ok=True)
     title_img.save(os.path.join(preview_dir, "titlepic.png"))
     menu_img.save(os.path.join(preview_dir, "m_doom.png"))
     sky_img.resize((1024, 512), Image.NEAREST).save(os.path.join(preview_dir, "rsky1.png"))
+    again_img.save(os.path.join(preview_dir, "wagain.png"))
+    keys_img.save(os.path.join(preview_dir, "wagaink.png"))
     print(f"title: TITLEPIC {len(title)} B, M_DOOM {menu_img.size}")
 
 

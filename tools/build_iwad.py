@@ -42,6 +42,9 @@ KEEP_SPRITES = {
     "STIM", "MEDI", "SOUL", "MEGA", "ARM1", "ARM2", "BON1", "BON2",
     # лес и барьер
     "TRE1", "TRE2", "SMIT", "TRED",
+    # лесной декор из make_decor.py (подменяет картинки неиспользуемых декораций Doom II):
+    # валун, камень, большой и малый куст, трава, цветы, грибы
+    "COL1", "COL2", "COL3", "COL4", "POB1", "POB2", "BRS1",
 }
 
 # Текстуры и флэты, нужные движку помимо карты.
@@ -49,6 +52,9 @@ KEEP_TEXTURES = {"AASHITTY", "SKY1"}  # первая текстура — «ну
 SKY_ALIASES = ("SKY2", "SKY3")       # движок ищет их по имени; делаем копиями SKY1
 KEEP_FLATS = {"F_SKY1", "GRNROCK", "FLOOR7_2",  # небо и фон рамки экрана
               "GRASS1"}  # фон меню настроек (WOOD_MENU_FLAT в m_menu.c)
+# Анимированные флэты: движок берёт все кадры между первым и последним, так что если карта
+# использует хоть один кадр, оставляем всю цепочку.
+ANIMATED_FLATS = [("FWATER1", "FWATER2", "FWATER3", "FWATER4")]
 
 # Звуки выкинутых монстров (DS-префикс).
 DROP_SOUNDS = {
@@ -232,14 +238,24 @@ def strip(lumps, keep_patches, keep_flats, keep_music):
 
 
 def add_custom(lumps, lumps_dirs):
-    """lumps_dirs — каталоги через os.pathsep; более поздние перекрывают ранние."""
+    """lumps_dirs — каталоги через os.pathsep; более поздние перекрывают ранние.
+
+    Лампы, которые уже есть в WAD, заменяются на месте (спрайт должен остаться между
+    S_START и S_END), новые дописываются в конец.
+    """
     custom = {}
     for lumps_dir in lumps_dirs.split(os.pathsep):
         for fn in sorted(os.listdir(lumps_dir)):
             name = os.path.splitext(fn)[0].upper()[:8]
             custom[name] = open(os.path.join(lumps_dir, fn), "rb").read()
-    out = [(n, d) for n, d in lumps if n not in custom]
-    out.extend(custom.items())
+    out, replaced = [], set()
+    for n, d in lumps:
+        if n in custom and n not in replaced:
+            out.append((n, custom[n]))
+            replaced.add(n)
+        elif n not in custom:
+            out.append((n, d))
+    out.extend((n, d) for n, d in custom.items() if n not in replaced)
     return out
 
 
@@ -251,6 +267,9 @@ def main():
     _, maps = read_wad(map_wad)
 
     used_textures, used_flats = map_usage(maps)
+    for group in ANIMATED_FLATS:
+        if used_flats & set(group):
+            used_flats |= set(group)
     tex1, pnames, keep_patches, ntex_before, ntex_after = trim_textures(lumps, used_textures)
     lumps = [(n, tex1 if n == "TEXTURE1" else pnames if n == "PNAMES" else d)
              for n, d in lumps if n != "TEXTURE2"]

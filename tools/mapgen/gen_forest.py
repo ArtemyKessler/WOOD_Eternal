@@ -20,18 +20,48 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from nodebuild import Builder  # noqa: E402
 
-# --- оформление (всё из Freedoom) ---
-FOREST_WALL = os.environ.get("WOOD_FOREST_WALL", "A-VINES")   # стена «чащи»: берёзовые заросли
-FLOOR_PATH = "GRASS2"
-FLOOR_CLEARING = "GRASS1"
+# --- оформление (всё из Freedoom, кроме декора из make_decor.py) ---
 CEILING = "F_SKY1"
 FLOOR_H, CEIL_H = 0, 256
+
+# Типы полян: стены чащи (на каждый отрезок стены — случайная из списка), земля, свет,
+# сколько «особенностей» (скал/прудов) и какой декор чаще.
+THEMES = {
+    "березняк": dict(walls=["A-VINES"], floor="GRASS1", light=(168, 184),
+                     rocks=(0, 1), ponds=(0, 1), decor="grass"),
+    "чаща": dict(walls=["A-CAMO1", "A-CAMO4"], floor="GRASS2", light=(144, 160),
+                 rocks=(0, 1), ponds=(0, 0), decor="bush"),
+    "камни": dict(walls=["A-MOSRK2", "SP_ROCK1"], floor="RROCK19", light=(176, 192),
+                  rocks=(2, 3), ponds=(0, 0), decor="stone"),
+    "болотце": dict(walls=["A-CAMO1", "A-VINES"], floor="RROCK20", light=(144, 160),
+                    rocks=(0, 0), ponds=(1, 3), decor="mushroom"),
+}
+START_THEME = "березняк"
+PATH_WALLS = ["A-VINES", "A-CAMO1", "A-CAMO4"]
+PATH_FLOORS = ["FLAT10", "RROCK16"]          # грунтовые тропинки
+PATH_LIGHT = (136, 160)
+
+# Особенности полян: скала (поднятый непроходимый сектор) и пруд (вода ниже уровня земли,
+# тоже непроходимый — иначе директор волн поставил бы барьер и по берегу).
+ROCK_WALL, ROCK_TOP = "SP_ROCK1", "RROCK18"
+ROCK_HEIGHTS = (48, 96)
+POND_BANK, POND_FLOOR, POND_DEPTH = "A-MUD", "FWATER1", 8   # мелко: гладь видна издалека
 
 # Типы вещей Doom II
 THING_PLAYER1 = 1
 THING_TREE_BIG = 54      # TRE2, большое дерево (радиус 32)
 THING_TREE_BURNT = 43    # TRE1, обгоревшее дерево (радиус 16)
 THING_STUMP = 47         # SMIT: в Doom пень, во Freedoom маленькое деревце (радиус 16)
+# декор из make_decor.py (подменяет неиспользуемые декорации Doom II)
+THING_BOULDER = 30       # COL1, валун (твёрдый)
+THING_STONE = 31         # COL2, камень (твёрдый)
+THING_BUSH_BIG = 32      # COL3, большой куст (твёрдый)
+THING_BUSH_SMALL = 33    # COL4, малый куст (твёрдый)
+THING_GRASS = 79         # POB1, трава (проходимая)
+THING_FLOWERS = 80       # POB2, цветы (проходимые)
+THING_MUSHROOMS = 81     # BRS1, грибы (проходимые)
+SOLID_THINGS = {THING_TREE_BIG, THING_TREE_BURNT, THING_STUMP, THING_BOULDER, THING_STONE,
+                THING_BUSH_BIG, THING_BUSH_SMALL}
 SKILL_ALL = 0x0007
 
 PATH_HALF_WIDTH = 128
@@ -64,6 +94,12 @@ class Zone:
     def __init__(self, kind, poly, tag=0, light=160, center=None, radius=0):
         self.kind, self.poly, self.tag, self.light = kind, poly, tag, light
         self.center, self.radius = center, radius
+        # оформление (assign_themes / add_features)
+        self.theme = None
+        self.walls, self.floor = ["A-VINES"], "GRASS1"
+        self.floor_h, self.ceil_h = FLOOR_H, CEIL_H
+        self.parent = None       # для скал и прудов — индекс поляны, внутри которой они стоят
+        self.bank = "-"          # нижняя текстура на границе с родителем
 
 
 GRID = 6                 # сетка GRID x GRID ячеек под поляны
@@ -75,6 +111,7 @@ MIN_CLEARINGS, MAX_CLEARINGS = 11, 14   # обычные поляны, без л
 BOSS_TAG = 100           # должен совпадать с WOOD_BOSS_TAG в engine/src/wood_director.c
 BOSS_RADIUS = 1216
 FLOOR_BOSS = os.environ.get("WOOD_BOSS_FLOOR", "RROCK16")
+BOSS_THEME, BOSS_LIGHT = "чаща", 128
 
 
 def flat_half(r):
@@ -185,6 +222,102 @@ def layout(rng):
     return zones, (sx, sy, angle)
 
 
+def assign_themes(zones, rng):
+    """Каждой поляне — свой тип леса (соседние по возможности разные), тропам — грунт."""
+    names = list(THEMES)
+    last = None
+    for z in zones:
+        if z.kind == "path":
+            z.walls = [rng.choice(PATH_WALLS)]
+            z.floor = rng.choice(PATH_FLOORS)
+            z.light = rng.randint(*PATH_LIGHT) // 8 * 8
+            continue
+        if z.kind == "boss":
+            # логово: тёмная чаща на голой земле, без скал и прудов (add_features его пропускает)
+            z.theme = BOSS_THEME
+            z.walls, z.floor, z.light = THEMES[BOSS_THEME]["walls"], FLOOR_BOSS, BOSS_LIGHT
+            continue
+        name = START_THEME if z.kind == "start" else rng.choice([n for n in names if n != last])
+        last = name
+        t = THEMES[name]
+        z.theme = name
+        z.walls, z.floor = t["walls"], t["floor"]
+        z.light = rng.randint(*t["light"]) // 8 * 8
+
+
+def _clockwise(poly):
+    area = sum(poly[i][0] * poly[(i + 1) % len(poly)][1] - poly[(i + 1) % len(poly)][0] * poly[i][1]
+               for i in range(len(poly)))
+    return poly if area < 0 else poly[::-1]
+
+
+def point_in_poly(x, y, poly):
+    inside = False
+    n = len(poly)
+    for i in range(n):
+        (ax, ay), (bx, by) = poly[i], poly[(i + 1) % n]
+        if (ay > y) != (by > y) and x < ax + (y - ay) * (bx - ax) / (by - ay):
+            inside = not inside
+    return inside
+
+
+def dist_to_poly(x, y, poly):
+    best = float("inf")
+    n = len(poly)
+    for i in range(n):
+        (ax, ay), (bx, by) = poly[i], poly[(i + 1) % n]
+        dx, dy = bx - ax, by - ay
+        t = max(0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy or 1)))
+        best = min(best, math.hypot(x - ax - t * dx, y - ay - t * dy))
+    return best
+
+
+def add_features(zones, rng):
+    """Скалы и пруды у края полян, между выходами троп.
+
+    Держим их в кольце 0.76..0.90 радиуса: директор ставит врагов не дальше ~0.69 радиуса
+    (плюс радиус самого врага), так что враг не появится внутри скалы, а входы троп (оси N/E/S/W) остаются свободными.
+    """
+    features = []
+    for zi, z in enumerate(zones):
+        if z.kind != "clearing":
+            continue
+        t = THEMES[z.theme]
+        kinds = ["rock"] * rng.randint(*t["rocks"]) + ["pond"] * rng.randint(*t["ponds"])
+        quadrants = rng.sample(range(4), min(4, len(kinds)))
+        cx, cy = z.center
+        for kind, q in zip(kinds, quadrants):
+            span = rng.uniform(0.35, 0.7)
+            mid = q * math.pi / 2 + math.pi / 4 + rng.uniform(-0.05, 0.05)
+            r_in, r_out = 0.76 * z.radius, 0.90 * z.radius
+            n = 5 if span < 0.5 else 7
+            outer, inner = [], []
+            for k in range(n):
+                a = mid - span / 2 + span * k / (n - 1)
+                edge = k in (0, n - 1)
+                ro = r_out - rng.uniform(0, 16) - (24 if edge else 0)
+                ri = r_in + rng.uniform(0, 24) + (24 if edge else 0)
+                outer.append((int(cx + ro * math.cos(a)), int(cy + ro * math.sin(a))))
+                inner.append((int(cx + ri * math.cos(a)), int(cy + ri * math.sin(a))))
+            poly = []
+            for v in outer + inner[::-1]:
+                if v not in poly:
+                    poly.append(v)
+            poly = _clockwise(poly)
+            f = Zone(kind, poly, light=z.light)
+            f.parent = zi
+            if kind == "rock":
+                f.walls, f.floor = [ROCK_WALL], ROCK_TOP
+                f.floor_h = FLOOR_H + rng.randrange(ROCK_HEIGHTS[0], ROCK_HEIGHTS[1] + 1, 8)
+                f.bank = ROCK_WALL
+            else:
+                f.walls, f.floor = [POND_BANK], POND_FLOOR
+                f.floor_h = FLOOR_H - POND_DEPTH
+                f.bank = POND_BANK
+            features.append(f)
+    zones.extend(features)
+
+
 def insert_tjunctions(zones):
     """Добавляет в рёбра зон чужие вершины, лежащие на этих рёбрах (стыки тропа/поляна)."""
     allv = {v for z in zones for v in z.poly}
@@ -220,12 +353,14 @@ def build_geometry(zones):
 
     sectors, sidedefs, linedefs = [], [], []
     edges = {}  # (va, vb) -> (zone index)
+    rng = random.Random(len(zones) * 7919 + len(vertices))
     for zi, z in enumerate(zones):
-        floor = {"clearing": FLOOR_CLEARING, "boss": FLOOR_BOSS}.get(z.kind, FLOOR_PATH)
-        sectors.append((FLOOR_H, CEIL_H, floor, CEILING, z.light, 0, z.tag))
+        sectors.append((z.floor_h, z.ceil_h, z.floor, CEILING, z.light, 0, z.tag))
         n = len(z.poly)
         for i in range(n):
             edges[(vid(z.poly[i]), vid(z.poly[(i + 1) % n]))] = zi
+            if z.parent is not None:   # скала/пруд — «дырка» в поляне-родителе
+                edges[(vid(z.poly[(i + 1) % n]), vid(z.poly[i]))] = z.parent
 
     done = set()
     for (a, b), zi in edges.items():
@@ -235,14 +370,17 @@ def build_geometry(zones):
         other = edges.get((b, a))
         if other is not None:
             done.add((b, a))
+            feature = next((zones[k] for k in (zi, other) if zones[k].parent is not None), None)
+            lower = feature.bank if feature else "-"
+            flags = 0x0004 | (0x0001 if feature else 0)   # к скале/пруду не пройти
             right = len(sidedefs)
-            sidedefs.append((0, 0, "-", "-", "-", zi))
+            sidedefs.append((0, 0, "-", lower, "-", zi))
             left = len(sidedefs)
-            sidedefs.append((0, 0, "-", "-", "-", other))
-            linedefs.append((a, b, 0x0004, 0, 0, right, left))  # двусторонняя
+            sidedefs.append((0, 0, "-", lower, "-", other))
+            linedefs.append((a, b, flags, 0, 0, right, left))  # двусторонняя
         else:
             right = len(sidedefs)
-            sidedefs.append((0, 0, "-", "-", FOREST_WALL, zi))
+            sidedefs.append((0, 0, "-", "-", rng.choice(zones[zi].walls), zi))
             linedefs.append((a, b, 0x0001, 0, 0, right, -1))     # непроходимая стена
     return vertices, sectors, sidedefs, linedefs
 
@@ -316,6 +454,66 @@ def place_things(zones, rng, player_start):
     return things
 
 
+DECOR = {   # тип декора поляны -> (твёрдые у края, мелочь по траве)
+    "grass": ([THING_BUSH_SMALL, THING_BUSH_BIG, THING_STONE],
+              [THING_GRASS, THING_GRASS, THING_FLOWERS, THING_FLOWERS, THING_MUSHROOMS]),
+    "bush": ([THING_BUSH_BIG, THING_BUSH_BIG, THING_BUSH_SMALL],
+             [THING_GRASS, THING_GRASS, THING_MUSHROOMS]),
+    "stone": ([THING_BOULDER, THING_STONE, THING_STONE, THING_BUSH_SMALL],
+              [THING_GRASS, THING_FLOWERS]),
+    "mushroom": ([THING_BUSH_SMALL, THING_STONE],
+                 [THING_MUSHROOMS, THING_MUSHROOMS, THING_GRASS, THING_GRASS]),
+}
+
+
+def place_decor(zones, vertices, linedefs, sidedefs, rng):
+    """Кусты и камни вдоль опушки, трава, цветы и грибы по земле."""
+    things = []
+    for v1, v2, flags, _, _, right, left in linedefs:
+        if left != -1:
+            continue
+        zone = zones[sidedefs[right][5]]
+        (ax, ay), (bx, by) = vertices[v1], vertices[v2]
+        length = math.hypot(bx - ax, by - ay)
+        nx, ny = (by - ay) / length, -(bx - ax) / length
+        solid = DECOR[THEMES[zone.theme]["decor"]][0] if zone.theme else \
+            [THING_BUSH_SMALL, THING_BUSH_SMALL, THING_STONE]
+        on_path = zone.kind == "path"
+        step = 200 if on_path else 150
+        for i in range(int(length // step)):
+            if rng.random() < 0.35:
+                continue
+            t = (i + rng.uniform(0.2, 0.8)) * step / length
+            d = rng.uniform(34, 46) if on_path else rng.uniform(56, 90)
+            things.append((int(ax + (bx - ax) * t + nx * d), int(ay + (by - ay) * t + ny * d),
+                           0, rng.choice(solid), SKILL_ALL))
+    for z in zones:
+        if z.parent is not None:
+            continue
+        xs, ys = [v[0] for v in z.poly], [v[1] for v in z.poly]
+        small = DECOR[THEMES[z.theme]["decor"]][1] if z.theme else [THING_GRASS, THING_GRASS,
+                                                                       THING_FLOWERS]
+        area = (max(xs) - min(xs)) * (max(ys) - min(ys))
+        for _ in range(int(area / (300 * 300))):
+            x, y = rng.uniform(min(xs), max(xs)), rng.uniform(min(ys), max(ys))
+            if point_in_poly(x, y, z.poly) and dist_to_poly(x, y, z.poly) > 24:
+                things.append((int(x), int(y), 0, rng.choice(small), SKILL_ALL))
+    return things
+
+
+def clear_features(things, zones):
+    """Убирает вещи, попавшие на скалы и в пруды (и вплотную к ним, чтобы не застревали)."""
+    feats = [z.poly for z in zones if z.parent is not None]
+    out = []
+    for t in things:
+        x, y, kind = t[0], t[1], t[3]
+        margin = 40 if kind in SOLID_THINGS else 8
+        if any(point_in_poly(x, y, p) or dist_to_poly(x, y, p) < margin for p in feats):
+            continue
+        out.append(t)
+    return out
+
+
 def pack_name(s):
     return s.encode("ascii").ljust(8, b"\0")
 
@@ -363,10 +561,15 @@ def main():
     for i in range(count):
         rng = random.Random(base_seed * 1000 + i)
         zones, player_start = layout(rng)
+        deco_rng = random.Random(base_seed * 7777 + i)   # отдельный ГСЧ: раскладка не меняется
+        assign_themes(zones, deco_rng)
+        add_features(zones, deco_rng)
         insert_tjunctions(zones)
         vertices, sectors, sidedefs, linedefs = build_geometry(zones)
         things = place_things(zones, rng, player_start) + \
-            edge_trees(zones, vertices, sidedefs, linedefs, rng)
+            edge_trees(zones, vertices, sidedefs, linedefs, rng) + \
+            place_decor(zones, vertices, linedefs, sidedefs, deco_rng)
+        things = things[:1] + clear_features(things[1:], zones)
         lumps += map_lumps(f"MAP{i + 1:02d}", vertices, sectors, sidedefs, linedefs, things)
     write_wad(out, lumps)
 
