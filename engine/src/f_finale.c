@@ -41,6 +41,8 @@
 #include "sounds.h"
 #include "d_deh.h"  // Ty 03/22/98 - externalizations
 #include "f_finale.h" // CPhipps - hmm...
+#include "d_main.h"   // WOOD: D_StartTitle
+#include "wood_director.h"
 
 
 // The implementation for UMAPINFO is kept separate to avoid demo sync issues
@@ -198,6 +200,13 @@ void F_StartFinale (void)
 
 	using_FMI = false;
 
+  // WOOD: победа над боссом леса — свой текст со статистикой забега на траве
+  if (WOOD_RunWon())
+  {
+    finaleflat = "GRASS1";
+    finaletext = WOOD_VictoryText();
+  }
+  else
 	if (gamemapinfo)
 	{
 		FMI_StartFinale();
@@ -283,7 +292,12 @@ void F_Ticker(void)
           if (!demo_compatibility && midstage)
             {
             next_level:
-              if (gamemap == 30 || (gamemission == pack_nerve && singleplayer && gamemap == 8))
+              if (WOOD_RunWon())            // WOOD: забег окончен — обратно на титульник
+                {
+                  WOOD_EndRun();
+                  D_StartTitle();
+                }
+              else if (gamemap == 30 || (gamemission == pack_nerve && singleplayer && gamemap == 8))
                 F_StartCast();              // cast of Doom 2 characters
               else
                 gameaction = ga_worlddone;  // next level, e.g. MAP07

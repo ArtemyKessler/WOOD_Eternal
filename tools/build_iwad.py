@@ -33,6 +33,8 @@ KEEP_SPRITES = {
     "MISL", "PLSS", "PLSE", "BFS1", "BFE1", "BFE2", "BAL1", "BAL2", "BAL7",
     # враги из WOODCFG
     "POSS", "SPOS", "CPOS", "TROO", "SARG", "SKUL", "HEAD", "BOSS", "BOS2",
+    # боссы логова (boss в WOODCFG): кибердемон и паук-мастермайнд
+    "CYBR", "SPID",
     # оружие и патроны на земле
     "CSAW", "SHOT", "MGUN", "SGN2", "LAUN", "PLAS", "BFUG",
     "CLIP", "AMMO", "SHEL", "SBOX", "ROCK", "BROK", "CELL", "CELP", "BPAK",
@@ -56,7 +58,6 @@ ANIMATED_FLATS = [("FWATER1", "FWATER2", "FWATER3", "FWATER4")]
 
 # Звуки выкинутых монстров (DS-префикс).
 DROP_SOUNDS = {
-    "CYBSIT", "CYBDTH", "HOOF", "METAL", "SPISIT", "SPIDTH",
     "VILSIT", "VILATK", "VIPAIN", "VILDTH", "VILACT", "FLAME", "FLAMST",
     "MANSIT", "MNPAIN", "MANATK", "MANDTH", "PESIT", "PEPAIN", "PEDTH",
     "SKESIT", "SKEATK", "SKEDTH", "SKEACT", "SKESWG", "SKEPCH",
