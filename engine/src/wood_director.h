@@ -3,6 +3,7 @@
 #define __WOOD_DIRECTOR__
 
 #include "d_player.h"
+#include "d_event.h"
 
 /* Вызывается в конце P_SetupLevel: сброс забега, разбор WOODCFG, стартовое оружие. */
 void WOOD_LevelStart(void);
@@ -34,5 +35,16 @@ void WOOD_Drawer(void);
 /* Бензопила не задела врага: если перед игроком дерево из saw_trees, пилим его.
  * Возвращает true, если пила попала в дерево. */
 dboolean WOOD_SawTree(player_t *p, angle_t angle, int damage);
+
+/* После зачистки поляны открыт выбор перка: игра стоит (G_Ticker, P_Ticker). */
+int WOOD_Frozen(void);
+
+/* Клавиши выбора перка (1-3, стрелки, Enter). Вызывается из G_Responder; true — событие съедено. */
+int WOOD_Responder(event_t *ev);
+
+/* Урон с учётом перков (пила, ружья, «толстая кора»). Вызывается в начале P_DamageMobj. */
+struct mobj_s;
+int WOOD_AdjustDamage(struct mobj_s *target, struct mobj_s *inflictor, struct mobj_s *source,
+                      int damage);
 
 #endif

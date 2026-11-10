@@ -297,6 +297,7 @@ void D_PostEvent(event_t *ev)
 
   M_Responder(ev) ||
 	  (gamestate == GS_LEVEL && (
+				     WOOD_Responder(ev) ||   // WOOD: выбор перка — раньше HUD (Enter)
 				     HU_Responder(ev) ||
 				     ST_Responder(ev) ||
 				     AM_Responder(ev) ||

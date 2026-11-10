@@ -1209,7 +1209,8 @@ void G_Ticker (void)
         }
     }
 
-  if (paused & 2 || (!demoplayback && menuactive && !netgame))
+  if (paused & 2 || (!demoplayback && menuactive && !netgame) ||
+      WOOD_Frozen())  // WOOD: выбор перка — мир стоит
     basetic++;  // For revenant tracers and RNG -- we must maintain sync
   else {
     // get commands, check consistancy, and build new consistancy check
