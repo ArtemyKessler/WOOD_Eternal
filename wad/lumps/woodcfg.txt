@@ -56,6 +56,8 @@ reward 2012
 #   lumberjack   — деревья пилятся втрое быстрее и роняют вдвое больше
 #   bark_armor   — +50 брони сразу (до 3 раз)
 #   second_wind  — полное здоровье после каждой зачистки
+# Через сколько миллисекунд после смерти последнего врага появляется выбор.
+perk_delay 1500
 perks sharp_chain sap_drinker blood_sap buckshot heavy_lead thick_bark deep_pockets lumberjack bark_armor second_wind
 # Когда зачищены все обычные поляны, открывается логово босса;
 # перед ним на последней поляне появляются сфера души и броня.
