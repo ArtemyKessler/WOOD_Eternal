@@ -183,6 +183,8 @@ static dboolean choice_open;          /* открыт выбор — игра н
 static int choice[WOOD_MAX_CHOICES], num_choices, choice_sel;
 static int choice_tic;                /* gametic открытия: короткая пауза против случайного нажатия */
 #define WOOD_CHOICE_ARM (TICRATE / 2)
+static int cfg_perk_delay = 1500;     /* мс от смерти последнего врага до выбора перка */
+static int choice_delay;              /* тиков до открытия выбора, 0 — не ждём */
 static int last_kills;                /* для BLOOD SAP: сколько убийств было на прошлом тике */
 
 /* --- призраки наград у входов на тропы --- */
@@ -426,6 +428,8 @@ static void Wood_ParseConfig(int lump)
       cfg_elite_budget = BETWEEN(100, 400, atoi(rest));
     else if (!strcmp(key, "elite_tier"))
       cfg_elite_tier = BETWEEN(0, 10, atoi(rest));
+    else if (!strcmp(key, "perk_delay"))
+      cfg_perk_delay = BETWEEN(0, 10000, atoi(rest));
     else if (!strcmp(key, "perks"))
     {
       char buf[256], *tok;
@@ -1261,8 +1265,9 @@ static void Wood_EndWave(void)
   /* выбор перка; после элитной поляны — два подряд */
   if (cfg_num_perks)
   {
+    /* выбор — не сразу: дать увидеть, как падает последний враг и появляются награды */
     perk_picks = c->route == ROUTE_ELITE ? 2 : 1;
-    Wood_OpenChoice();
+    choice_delay = MAX(1, cfg_perk_delay * TICRATE / 1000);
   }
 }
 
@@ -1809,6 +1814,7 @@ void WOOD_LevelStart(void)
   memset(perk_level, 0, sizeof(perk_level));
   perk_picks = 0;
   choice_open = false;
+  choice_delay = 0;
   last_kills = 0;
   memset(icons, 0, sizeof(icons));
   num_icons = 0;
@@ -1880,6 +1886,12 @@ void WOOD_Ticker(void)
 
   Wood_TickIcons(p->mo);
   Wood_MimicThink(p);
+
+  if (choice_delay > 0 && !--choice_delay)
+  {
+    Wood_OpenChoice();
+    return;
+  }
 
   if (current >= 0)
   {
