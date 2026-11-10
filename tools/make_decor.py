@@ -14,6 +14,7 @@
     79 POB1 -> пучок травы      (проходимый)
     80 POB2 -> цветы            (проходимый)
     81 BRS1 -> грибы            (проходимый)
+    48 ELEC -> золотое дерево   (твёрдое; директор ставит его вместо обычного, см. golden_tree)
 
 Использование: make_decor.py <freedoom2.wad> <out_dir>
 (лампы <имя>.lmp кладутся в out_dir, превью PNG — в <out_dir>-preview)
@@ -261,6 +262,20 @@ def mushrooms(cm, cap, dots, stem, rng, w, h):
     return cv
 
 
+def golden_tree(lumps, pal):
+    """Большое дерево TRE2, перекрашенное в золото: яркость пикселя -> оттенок золота."""
+    w, h, px = patch_pixels(lumps["TRE2A0"])
+    left, top = struct.unpack("<hh", lumps["TRE2A0"][4:8])
+    gold = {}
+    rows = [[None] * w for _ in range(h)]
+    for (x, y), c in px.items():
+        if c not in gold:
+            v = min(1.0, brightness(pal, c) / 105) ** 0.8
+            gold[c] = nearest(pal, (int(110 + 145 * v), int(75 + 165 * v), int(10 + 120 * v ** 3)))
+        rows[y][x] = gold[c]
+    return rows, left, top
+
+
 # --- палитра ---
 
 
@@ -300,8 +315,15 @@ def main():
     preview_dir = out_dir.rstrip("/") + "-preview"
     os.makedirs(preview_dir, exist_ok=True)
     total = 0
+    rows, left, top = golden_tree(lumps, pal)
+    gold_cv = Canvas(len(rows[0]), len(rows), cm)
+    gold_cv.px = rows
+    sprites["ELECA0"] = (gold_cv, (left, top))
     for name, (cv, sink) in sprites.items():
-        data = cv.lump(sink)
+        if isinstance(sink, tuple):          # готовые смещения (как у исходного спрайта)
+            data = doom_picture(cv.px, *sink)
+        else:
+            data = cv.lump(sink)
         total += len(data)
         open(os.path.join(out_dir, name.lower() + ".lmp"), "wb").write(data)
         img = cv.image(pal)

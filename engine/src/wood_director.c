@@ -18,6 +18,9 @@
  *    у входов на тропы висят полупрозрачные «призраки» наград — игрок сам выбирает маршрут;
  *  - после зачистки поляны игра замирает и предлагает 3 перка на выбор (WOOD_Responder,
  *    WOOD_Drawer); перки живут до конца забега.
+ *  - часть деревьев — мимики: шуршат, если подойти, и кусаются, если подойти вплотную
+ *    или начать пилить (листва краснеет); спиленный мимик роняет аптечку;
+ *  - иногда в лесу растёт золотое дерево: светится, пилится дольше, роняет редкий лут.
  *
  * Параметры берутся из WOODCFG (см. wad/lumps/woodcfg.txt).
  */
@@ -30,6 +33,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <ctype.h>
 
 #include "doomstat.h"
 #include "d_player.h"
@@ -40,6 +44,7 @@
 #include "p_maputl.h"
 #include "p_pspr.h"
 #include "p_tick.h"
+#include "p_inter.h"
 #include "r_main.h"
 #include "r_state.h"
 #include "s_sound.h"
@@ -49,6 +54,7 @@
 #include "r_patch.h"
 #include "w_wad.h"
 #include "lprintf.h"
+#include "r_draw.h"
 #include "g_game.h"
 #include "p_inter.h"
 #include "d_event.h"
@@ -191,6 +197,37 @@ static int num_icons;
 static int hint_icon = -1;            /* у какого призрака уже показали подсказку */
 
 static void Wood_Message(const char *msg, int color, int sfx);
+/* --- деревья-мимики --- */
+#define WOOD_MAX_MIMICS      96
+#define WOOD_MIMIC_SAFE      (384 * FRACUNIT)   /* у старта мимиков нет */
+#define WOOD_MIMIC_RUSTLE    (192 * FRACUNIT)   /* ближе — мимик шуршит (подсказка) */
+#define WOOD_MIMIC_REACH     (80 * FRACUNIT)    /* досягаемость укуса от края ствола */
+#define WOOD_MIMIC_RED       ((uint_64_t)3 << MF_TRANSSHIFT) /* листва -> красная */
+static int cfg_mimic_chance = 0;              /* % деревьев, которые окажутся мимиками */
+static int cfg_mimic_health = 240;
+static int cfg_mimic_wake = 64;               /* проснуться, если игрок ближе (от края ствола) */
+static int cfg_mimic_dmg_min = 6, cfg_mimic_dmg_max = 14;
+static int cfg_mimic_bite_tics = 25;
+static mobjtype_t cfg_mimic_drops[WOOD_MAX_REWARDS];
+static int cfg_num_mimic_drops;
+
+typedef struct {
+  mobj_t *mo;
+  dboolean awake;
+  int cooldown;      /* тиков до следующего укуса / шороха */
+} wood_mimic_t;
+static wood_mimic_t mimics[WOOD_MAX_MIMICS];
+static int num_mimics;
+static dboolean mimic_warned;   /* «THE TREE IS ALIVE!» — один раз за забег */
+
+/* --- золотое дерево --- */
+#define WOOD_GOLDEN_SAFE     (768 * FRACUNIT)   /* подальше от старта, чтобы его искать */
+static mobjtype_t cfg_golden_type = NUMMOBJTYPES;
+static int cfg_golden_chance = 0;             /* % забегов, в которых оно есть */
+static int cfg_golden_health = 360;
+static mobjtype_t cfg_golden_drops[WOOD_MAX_REWARDS];
+static int cfg_num_golden_drops;
+static dboolean golden_hint;    /* показать «что-то блестит» на первом тике */
 
 /* --- состояние забега (сбрасывается при каждой загрузке уровня, в т.ч. после смерти) --- */
 static dboolean wood_active;
@@ -207,7 +244,18 @@ static int boss_idx = -1;             /* индекс логова в clearings,
 static int waves_cleared;             /* всего зачисток за забег — ось сложности */
 static int victory_tics;              /* отсчёт до финального экрана после победы */
 static dboolean run_won;              /* забег выигран: финальный экран — наш */
-static int won_waves, won_kills, won_tics;
+static int trees_felled;              /* спилено деревьев за забег */
+
+/* Итоги забега: снимок в момент смерти или победы, чтобы цифры не менялись,
+ * пока игрок смотрит на экран итогов (время идёт, ракета в полёте ещё может убить). */
+typedef struct {
+  int tics;          /* время в лесу */
+  int kills;
+  int trees;
+  int cleared;       /* зачищено полян, включая логово */
+  int clearings;     /* всего полян на карте, включая логово */
+} wood_summary_t;
+static wood_summary_t summary;
 static unsigned int rng_state = 0;
 
 /* --- музыка --- */
@@ -285,6 +333,9 @@ static void Wood_ParseConfig(int lump)
   cfg_num_supply_rewards = cfg_num_cache_rewards = cfg_num_elite_rewards = 0;
   cfg_num_perks = 0;
   memset(cfg_perk_enabled, 0, sizeof(cfg_perk_enabled));
+  cfg_num_mimic_drops = cfg_num_golden_drops = 0;
+  cfg_mimic_chance = cfg_golden_chance = 0;
+  cfg_golden_type = NUMMOBJTYPES;
 
   while (pos < len)
   {
@@ -395,6 +446,30 @@ static void Wood_ParseConfig(int lump)
         }
       }
     }
+    else if (!strcmp(key, "mimic_chance"))
+      cfg_mimic_chance = BETWEEN(0, 100, atoi(rest));
+    else if (!strcmp(key, "mimic_health"))
+      cfg_mimic_health = MAX(1, atoi(rest));
+    else if (!strcmp(key, "mimic_wake"))
+      cfg_mimic_wake = BETWEEN(0, 512, atoi(rest));
+    else if (!strcmp(key, "mimic_damage"))
+    {
+      int lo, hi;
+      if (sscanf(rest, "%d %d", &lo, &hi) == 2 && lo > 0 && hi >= lo)
+        cfg_mimic_dmg_min = lo, cfg_mimic_dmg_max = hi;
+    }
+    else if (!strcmp(key, "mimic_bite_tics"))
+      cfg_mimic_bite_tics = MAX(1, atoi(rest));
+    else if (!strcmp(key, "mimic_drop"))
+      Wood_ParseTypeList(rest, cfg_mimic_drops, &cfg_num_mimic_drops, WOOD_MAX_REWARDS);
+    else if (!strcmp(key, "golden_tree"))
+      cfg_golden_type = Wood_TypeForDoomednum(atoi(rest));
+    else if (!strcmp(key, "golden_chance"))
+      cfg_golden_chance = BETWEEN(0, 100, atoi(rest));
+    else if (!strcmp(key, "golden_health"))
+      cfg_golden_health = MAX(1, atoi(rest));
+    else if (!strcmp(key, "golden_drop"))
+      Wood_ParseTypeList(rest, cfg_golden_drops, &cfg_num_golden_drops, WOOD_MAX_REWARDS);
   }
   W_UnlockLumpNum(lump);
   lprintf(LO_INFO, "WOOD: %d monster types, %d weapons in WOODCFG\n",
@@ -1095,15 +1170,26 @@ static void Wood_GiveRewards(const wood_clearing_t *c)
       Wood_SpawnWithFog(x, y, cfg_rewards[i]);
 }
 
+/* Снимок итогов забега для экрана смерти и финального экрана. */
+static void Wood_TakeSummary(const player_t *p)
+{
+  int i;
+  summary.tics = leveltime;
+  summary.kills = p->killcount;
+  summary.trees = trees_felled;
+  summary.cleared = 0;
+  for (i = 0; i < num_clearings; i++)
+    if (clearings[i].cleared)
+      summary.cleared++;
+  summary.clearings = num_clearings;
+}
+
 /* Победа над боссом: короткая пауза, потом финальный экран (F_StartFinale → WOOD_VictoryText). */
 static void Wood_Victory(void)
 {
-  player_t *p = &players[consoleplayer];
   run_won = true;
   victory_tics = WOOD_VICTORY_DELAY;
-  won_waves = waves_cleared;
-  won_kills = p->killcount;
-  won_tics = leveltime;
+  Wood_TakeSummary(&players[consoleplayer]);
   lprintf(LO_INFO, "WOOD: run won after %d waves\n", waves_cleared);
   Wood_Message("THE WOOD FALLS SILENT", CR_GOLD, sfx_secret);
 }
@@ -1187,6 +1273,8 @@ static void Wood_EndWave(void)
 static dboolean Wood_IsSawTree(const mobj_t *mo)
 {
   int i;
+  if (mo->type == cfg_golden_type)
+    return true;
   for (i = 0; i < cfg_num_saw_trees; i++)
     if (mo->type == cfg_saw_trees[i])
       return true;
@@ -1211,6 +1299,167 @@ static void Wood_InitTrees(void)
     }
   }
   lprintf(LO_INFO, "WOOD: %d sawable trees\n", n);
+}
+
+static void Wood_InitRedTranslation(void);
+
+static wood_mimic_t *Wood_FindMimic(const mobj_t *mo)
+{
+  int i;
+  for (i = 0; i < num_mimics; i++)
+    if (mimics[i].mo == mo)
+      return &mimics[i];
+  return NULL;
+}
+
+/* Золотое дерево: одно случайное дерево подальше от старта заменяем золотым.
+ * Мимики: каждое дерево подальше от старта с шансом mimic_chance. */
+static void Wood_PlantSpecialTrees(void)
+{
+  mobj_t *pmo = players[consoleplayer].mo;
+  static mobj_t *cand[4096];
+  int i = 0, n = 0;
+  thinker_t *th;
+
+  num_mimics = 0;
+  golden_hint = false;
+  Wood_InitRedTranslation();
+  if (!pmo)
+    return;
+
+  for (th = thinkercap.next; th != &thinkercap && n < (int)(sizeof(cand) / sizeof(*cand)); th = th->next)
+  {
+    mobj_t *mo;
+    if (th->function != P_MobjThinker)
+      continue;
+    mo = (mobj_t *)th;
+    if (Wood_IsSawTree(mo) && mo->type != cfg_golden_type &&
+        P_AproxDistance(mo->x - pmo->x, mo->y - pmo->y) > WOOD_MIMIC_SAFE)
+      cand[n++] = mo;
+  }
+
+  if (cfg_golden_type != NUMMOBJTYPES && n && Wood_RandRange(1, 100) <= cfg_golden_chance)
+  {
+    int tries;
+    for (tries = 0; tries < 32; tries++)
+    {
+      i = Wood_RandRange(0, n - 1);
+      if (P_AproxDistance(cand[i]->x - pmo->x, cand[i]->y - pmo->y) > WOOD_GOLDEN_SAFE)
+        break;
+    }
+    {
+      mobj_t *old = cand[i];
+      mobj_t *gold = P_SpawnMobj(old->x, old->y, ONFLOORZ, cfg_golden_type);
+      gold->radius = old->radius;          /* ствол такой же толщины, как у дерева на его месте */
+      gold->health = cfg_golden_health;
+      gold->frame |= FF_FULLBRIGHT;        /* светится в тёмном лесу */
+      lprintf(LO_INFO, "WOOD: golden tree at %d,%d\n", old->x >> FRACBITS, old->y >> FRACBITS);
+      P_RemoveMobj(old);
+      cand[i] = cand[--n];
+      golden_hint = true;
+    }
+  }
+
+  /* мимики — случайная выборка из оставшихся деревьев (частичное перемешивание) */
+  {
+    int want = MIN(WOOD_MAX_MIMICS, n * cfg_mimic_chance / 100);
+    for (i = 0; i < want; i++)
+    {
+      int j = Wood_RandRange(i, n - 1);
+      mobj_t *t = cand[j];
+      wood_mimic_t *m = &mimics[num_mimics++];
+      cand[j] = cand[i];
+      cand[i] = t;
+      m->mo = t;
+        m->awake = false;
+        m->cooldown = Wood_RandRange(0, TICRATE * 2);
+      m->mo->health = cfg_mimic_health;
+    }
+  }
+  lprintf(LO_INFO, "WOOD: %d mimic trees\n", num_mimics);
+}
+
+/* Третья таблица перекраски (в одиночной игре её никто не использует) — «кровавая»:
+ * любой цвет -> красный той же яркости. Иначе покраснела бы только зелёная листва,
+ * а у голых деревьев (TRE1, TRE2) её нет. */
+static void Wood_InitRedTranslation(void)
+{
+  static dboolean done;
+  const byte *pal;
+  int i, j;
+  if (done || !translationtables)
+    return;
+  done = true;
+  pal = W_CacheLumpName("PLAYPAL");
+  for (i = 0; i < 256; i++)
+  {
+    int lum = (pal[i * 3] * 30 + pal[i * 3 + 1] * 59 + pal[i * 3 + 2] * 11) / 100;
+    int r = MIN(255, 60 + lum * 2), g = lum / 4, b = lum / 5;
+    int best = i, best_d = INT_MAX;
+    for (j = 0; j < 256; j++)
+    {
+      int dr = pal[j * 3] - r, dg = pal[j * 3 + 1] - g, db = pal[j * 3 + 2] - b;
+      int d = dr * dr * 3 + dg * dg * 4 + db * db * 2;
+      if (d < best_d)
+        best_d = d, best = j;
+    }
+    translationtables[512 + i] = (byte)best;
+  }
+  W_UnlockLumpName("PLAYPAL");
+}
+
+static void Wood_WakeMimic(wood_mimic_t *m)
+{
+  if (m->awake)
+    return;
+  m->awake = true;
+  m->cooldown = TICRATE / 3;                 /* короткая пауза — и кусает */
+  m->mo->flags = (m->mo->flags & ~MF_TRANSLATION) | WOOD_MIMIC_RED;
+  S_StartSound(m->mo, sfx_sgtsit);
+  if (!mimic_warned)
+  {
+    mimic_warned = true;
+    Wood_Message("THE TREE IS ALIVE!", CR_RED, 0);
+  }
+  lprintf(LO_INFO, "WOOD: mimic awake\n");
+}
+
+/* Мимики: спящие шуршат, когда игрок рядом, и просыпаются вплотную; проснувшиеся кусают. */
+static void Wood_MimicThink(player_t *p)
+{
+  mobj_t *pmo = p->mo;
+  int i;
+
+  for (i = 0; i < num_mimics; i++)
+  {
+    wood_mimic_t *m = &mimics[i];
+    fixed_t edge;
+    if (!m->mo)
+      continue;
+    if (m->cooldown > 0)
+      m->cooldown--;
+    edge = P_AproxDistance(m->mo->x - pmo->x, m->mo->y - pmo->y) - m->mo->radius - pmo->radius;
+
+    if (!m->awake)
+    {
+      if (edge < cfg_mimic_wake * FRACUNIT && P_CheckSight(m->mo, pmo))
+        Wood_WakeMimic(m);
+      else if (edge < WOOD_MIMIC_RUSTLE && !m->cooldown)
+      {
+        m->cooldown = Wood_RandRange(TICRATE * 2, TICRATE * 4);
+        S_StartSound(m->mo, sfx_dmact);    /* подозрительное шуршание */
+      }
+      continue;
+    }
+
+    if (m->cooldown || edge > WOOD_MIMIC_REACH || pmo->z > m->mo->z + m->mo->height ||
+        !P_CheckSight(m->mo, pmo))
+      continue;
+    m->cooldown = cfg_mimic_bite_tics;
+    S_StartSound(m->mo, sfx_sgtatk);
+    /* без inflictor — без отбрасывания, иначе укус выталкивает игрока из-под пилы */
+    P_DamageMobj(pmo, NULL, m->mo, Wood_RandRange(cfg_mimic_dmg_min, cfg_mimic_dmg_max));
+  }
 }
 
 /* Тип патронов предмета-ящика (по спрайту), или NUMAMMO. */
@@ -1254,11 +1503,29 @@ static void Wood_FellTree(player_t *p, mobj_t *tree)
   fixed_t x = tree->x, y = tree->y;
   angle_t away = R_PointToAngle2(p->mo->x, p->mo->y, x, y);
   mobjtype_t drop = Wood_PickSawDrop(p);
+  mobjtype_t bonus = NUMMOBJTYPES;
+  wood_mimic_t *mimic = Wood_FindMimic(tree);
+  dboolean golden = tree->type == cfg_golden_type;
   mobj_t *mo;
   int k, drops = perk_level[PK_LUMBERJACK] ? 2 : 1;
 
-  S_StartSound(tree, sfx_bdcls);   /* глухой удар — дерево падает */
+  if (mimic)
+  {
+    mimic->mo = NULL;
+    if (cfg_num_mimic_drops)
+      bonus = cfg_mimic_drops[Wood_RandRange(0, cfg_num_mimic_drops - 1)];
+    S_StartSound(NULL, sfx_sgtdth);   /* предсмертный рёв (без источника — дерево исчезнет) */
+  }
+  else if (golden)
+  {
+    if (cfg_num_golden_drops)
+      bonus = cfg_golden_drops[Wood_RandRange(0, cfg_num_golden_drops - 1)];
+    S_StartSound(NULL, sfx_getpow);
+  }
+  else
+    S_StartSound(tree, sfx_bdcls);   /* глухой удар — дерево падает */
   P_RemoveMobj(tree);
+  trees_felled++;
   if (cfg_saw_stump != NUMMOBJTYPES)
     P_SpawnMobj(x, y, ONFLOORZ, cfg_saw_stump);
 
@@ -1272,8 +1539,19 @@ static void Wood_FellTree(player_t *p, mobj_t *tree)
     mo->flags |= MF_DROPPED;   /* как из убитого врага: половина обычного */
     P_SpawnMobj(mo->x, mo->y, mo->z, MT_IFOG);
   }
-  lprintf(LO_INFO, "WOOD: tree felled, drop %d\n", drop);
-  if (current < 0)
+  if (bonus != NUMMOBJTYPES)
+  {
+    /* награда — на месте ствола */
+    mo = P_SpawnMobj(x, y, ONFLOORZ, bonus);
+    P_SpawnMobj(x, y, mo->z, golden ? MT_TFOG : MT_IFOG);
+  }
+  lprintf(LO_INFO, "WOOD: tree felled%s, drop %d, bonus %d\n",
+          mimic ? " (mimic)" : golden ? " (golden)" : "", drop, bonus);
+  if (golden)
+    Wood_Message("GOLDEN TIMBER!", CR_GOLD, 0);
+  else if (mimic)
+    Wood_Message("THE MIMIC IS FELLED", CR_GREEN, 0);
+  else if (current < 0)
     Wood_Message("TIMBER!", CR_GOLD, 0);
 }
 
@@ -1320,6 +1598,11 @@ dboolean WOOD_SawTree(player_t *p, angle_t angle, int damage)
   damage *= 1 + perk_level[PK_SHARP_CHAIN];
   if (perk_level[PK_LUMBERJACK])
     damage *= 3;
+  {
+    wood_mimic_t *m = Wood_FindMimic(best);
+    if (m)
+      Wood_WakeMimic(m);             /* пилить мимика — разбудить его */
+  }
   best->health -= damage;
   if (best->health <= 0)
     Wood_FellTree(p, best);
@@ -1346,6 +1629,8 @@ static dboolean again_armed;
 
 int WOOD_DeathThink(player_t *player)
 {
+  if (!dead_tics)
+    Wood_TakeSummary(player);
   if (dead_tics < WOOD_AGAIN_DELAY)
   {
     dead_tics++;
@@ -1401,11 +1686,53 @@ static void Wood_DrawChoice(void)
   Wood_WriteCentered(48 + num_choices * 36, "1-3 OR ARROWS, ENTER TO TAKE", CR_GRAY);
 }
 
+extern patchnum_t hu_font[HU_FONTSIZE];
+
+/* Строка мелким шрифтом HUD с тенью; align: 0 — от x вправо, 1 — до x (выравнивание вправо). */
+static int Wood_TextWidth(const char *str)
+{
+  int w = 0, c;
+  for (; *str; str++)
+  {
+    c = toupper((unsigned char)*str) - HU_FONTSTART;
+    w += (c < 0 || c >= HU_FONTSIZE) ? 4 : hu_font[c].width;
+  }
+  return w;
+}
+
+static void Wood_Text(int x, int y, const char *str, int cm, int align)
+{
+  int c, pass;
+  const char *ch;
+  if (align)
+    x -= Wood_TextWidth(str);
+  for (pass = 0; pass < 2; pass++)
+  {
+    int cx = x + (pass ? 0 : 1), cy = y + (pass ? 0 : 1);
+    for (ch = str; *ch; ch++)
+    {
+      c = toupper((unsigned char)*ch) - HU_FONTSTART;
+      if (c < 0 || c >= HU_FONTSIZE)
+      {
+        cx += 4;
+        continue;
+      }
+      V_DrawNumPatch(cx, cy, 0, hu_font[c].lumpnum, pass ? cm : CR_BLACK,
+                     VPT_STRETCH | VPT_TRANS);
+      cx += hu_font[c].width;
+    }
+  }
+}
+
+/* Экран итогов забега поверх мёртвого игрока: «Again?», цифры забега, подсказка с клавишами. */
+#define WOOD_SUMMARY_LINE  11
+#define WOOD_SUMMARY_HALF  64     /* полуширина таблицы итогов */
 void WOOD_Drawer(void)
 {
   static int lump_again = -2, lump_keys = -2;
   player_t *p = &players[displayplayer];
-  int w;
+  int again_h = 0, keys_h = 0, y, secs;
+  char buf[32];
 
   if (WOOD_Frozen() && !menuactive)
   {
@@ -1421,16 +1748,42 @@ void WOOD_Drawer(void)
     lump_keys = W_CheckNumForName("WAGAINK");
   }
   if (lump_again >= 0)
-  {
-    w = R_NumPatchWidth(lump_again);
-    V_DrawNumPatch((320 - w) / 2, 64, 0, lump_again, CR_DEFAULT, VPT_STRETCH);
-  }
+    again_h = R_NumPatchHeight(lump_again);
+  if (lump_keys >= 0)
+    keys_h = R_NumPatchHeight(lump_keys);
+
+  /* всё по центру области над строкой состояния (0..168) */
+  y = (168 - (again_h + 6 + 4 * WOOD_SUMMARY_LINE + 6 + keys_h)) / 2;
+  if (y < 2)
+    y = 2;
+
+  if (lump_again >= 0)
+    V_DrawNumPatch((320 - R_NumPatchWidth(lump_again)) / 2, y, 0, lump_again,
+                   CR_DEFAULT, VPT_STRETCH);
+  y += again_h + 6;
+
+  secs = summary.tics / TICRATE;
+  sprintf(buf, "%d:%02d", secs / 60, secs % 60);
+  Wood_Text(160 - WOOD_SUMMARY_HALF, y, "TIME", CR_TAN, 0);
+  Wood_Text(160 + WOOD_SUMMARY_HALF, y, buf, CR_GOLD, 1);
+  y += WOOD_SUMMARY_LINE;
+  sprintf(buf, "%d", summary.kills);
+  Wood_Text(160 - WOOD_SUMMARY_HALF, y, "FOES FELLED", CR_TAN, 0);
+  Wood_Text(160 + WOOD_SUMMARY_HALF, y, buf, CR_GOLD, 1);
+  y += WOOD_SUMMARY_LINE;
+  sprintf(buf, "%d", summary.trees);
+  Wood_Text(160 - WOOD_SUMMARY_HALF, y, "TREES CUT DOWN", CR_TAN, 0);
+  Wood_Text(160 + WOOD_SUMMARY_HALF, y, buf, CR_GOLD, 1);
+  y += WOOD_SUMMARY_LINE;
+  sprintf(buf, "%d/%d", summary.cleared, summary.clearings);
+  Wood_Text(160 - WOOD_SUMMARY_HALF, y, "CLEARINGS", CR_TAN, 0);
+  Wood_Text(160 + WOOD_SUMMARY_HALF, y, buf, CR_GOLD, 1);
+  y += WOOD_SUMMARY_LINE + 6;
+
   /* подсказка мигает: секунду видна, полсекунды нет */
   if (lump_keys >= 0 && (gametic % (TICRATE * 3 / 2)) < TICRATE)
-  {
-    w = R_NumPatchWidth(lump_keys);
-    V_DrawNumPatch((320 - w) / 2, 118, 0, lump_keys, CR_DEFAULT, VPT_STRETCH);
-  }
+    V_DrawNumPatch((320 - R_NumPatchWidth(lump_keys)) / 2, y, 0, lump_keys,
+                   CR_DEFAULT, VPT_STRETCH);
 }
 
 void WOOD_LevelStart(void)
@@ -1448,6 +1801,8 @@ void WOOD_LevelStart(void)
   waves_cleared = 0;
   victory_tics = 0;
   run_won = false;
+  trees_felled = 0;
+  memset(&summary, 0, sizeof(summary));
   music_started = false;
   dead_tics = 0;
   again_armed = false;
@@ -1458,6 +1813,11 @@ void WOOD_LevelStart(void)
   memset(icons, 0, sizeof(icons));
   num_icons = 0;
   hint_icon = -1;
+  for (i = 0; i < WOOD_MAX_MIMICS; i++)
+    mimics[i].mo = NULL;
+  num_mimics = 0;
+  mimic_warned = false;
+  golden_hint = false;
 
   wood_active = lump >= 0;
   if (!wood_active)
@@ -1469,6 +1829,7 @@ void WOOD_LevelStart(void)
   Wood_Seed();
   Wood_AssignRoutes();
   Wood_PlaceIcons();
+  Wood_PlantSpecialTrees();
 
   if (playeringame[consoleplayer] && players[consoleplayer].mo)
     Wood_SetupPlayer(&players[consoleplayer]);
@@ -1508,6 +1869,8 @@ void WOOD_Ticker(void)
   {
     music_started = true;
     Wood_CalmMusic();
+    if (golden_hint)
+      Wood_Message("SOMETHING GLITTERS IN THE WOOD...", CR_GOLD, 0);
   }
 
   /* BLOOD SAP: каждое убийство лечит */
@@ -1516,6 +1879,7 @@ void WOOD_Ticker(void)
   last_kills = p->killcount;
 
   Wood_TickIcons(p->mo);
+  Wood_MimicThink(p);
 
   if (current >= 0)
   {
@@ -1577,17 +1941,19 @@ int WOOD_RunWon(void)
 const char *WOOD_VictoryText(void)
 {
   static char text[512];
-  int secs = won_tics / TICRATE;
+  int secs = summary.tics / TICRATE;
   sprintf(text,
           "THE KEEPER OF THE WOOD HAS FALLEN.\n"
           "THE TREES GO QUIET... FOR NOW.\n"
           "\n"
-          "CLEARINGS TAMED: %d\n"
-          "FOES FELLED: %d\n"
           "TIME IN THE WOOD: %d:%02d\n"
+          "FOES FELLED: %d\n"
+          "TREES CUT DOWN: %d\n"
+          "CLEARINGS TAMED: %d/%d\n"
           "\n"
           "PRESS FIRE TO LEAVE THE FOREST.",
-          won_waves, won_kills, secs / 60, secs % 60);
+          secs / 60, secs % 60, summary.kills, summary.trees,
+          summary.cleared, summary.clearings);
   return text;
 }
 
