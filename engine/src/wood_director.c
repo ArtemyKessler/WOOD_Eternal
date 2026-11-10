@@ -14,6 +14,10 @@
  *  - победа над боссом — конец забега: финальный экран со статистикой, затем титульник;
  *  - деревья можно спилить бензопилой (WOOD_SawTree): спиленное дерево исчезает
  *    и роняет немного патронов (на его месте можно оставить saw_stump);
+ *  - у каждой поляны свой тип награды (оружие, припасы, тайник с патронами, элитная волна);
+ *    у входов на тропы висят полупрозрачные «призраки» наград — игрок сам выбирает маршрут;
+ *  - после зачистки поляны игра замирает и предлагает 3 перка на выбор (WOOD_Responder,
+ *    WOOD_Drawer); перки живут до конца забега.
  *  - часть деревьев — мимики: шуршат, если подойти, и кусаются, если подойти вплотную
  *    или начать пилить (листва краснеет); спиленный мимик роняет аптечку;
  *  - иногда в лесу растёт золотое дерево: светится, пилится дольше, роняет редкий лут.
@@ -52,7 +56,13 @@
 #include "lprintf.h"
 #include "r_draw.h"
 #include "g_game.h"
+#include "p_inter.h"
+#include "d_event.h"
 #include "wood_director.h"
+
+/* m_menu.c */
+void M_WriteText(int x, int y, const char *string, int cm);
+int  M_StringWidth(const char *string);
 
 #define WOOD_MAX_CLEARINGS   32
 #define WOOD_MAX_MONSTERS    32
@@ -70,12 +80,23 @@ typedef struct {
   int min_wave;
 } wood_monster_t;
 
+/* Тип награды поляны: виден заранее по «призраку» у входа на тропу. */
+typedef enum {
+  ROUTE_NONE,          /* логово босса */
+  ROUTE_WEAPON,        /* новое оружие (призрак — само это оружие) */
+  ROUTE_SUPPLY,        /* аптечки и броня */
+  ROUTE_CACHE,         /* рюкзак и ящики патронов */
+  ROUTE_ELITE,         /* элитная волна: тяжелее, но сундук и лишний перк; не обязательна */
+} wood_route_t;
+
 typedef struct {
   sector_t *sector;
   fixed_t cx, cy;      /* центр (по габаритам) */
   fixed_t radius;      /* половина меньшей стороны габаритов */
   dboolean cleared;    /* зачищена */
   dboolean boss;       /* логово босса */
+  wood_route_t route;  /* что за зачистку */
+  mobjtype_t weapon;   /* для ROUTE_WEAPON — какое оружие */
 } wood_clearing_t;
 
 #define WOOD_MAX_TORCHES     128
@@ -115,6 +136,67 @@ static mobjtype_t cfg_saw_stump = NUMMOBJTYPES;
 static mobjtype_t cfg_saw_drops[WOOD_MAX_REWARDS];
 static int cfg_num_saw_drops;
 
+/* --- типы полян (развилки) --- */
+static mobjtype_t cfg_supply_rewards[WOOD_MAX_REWARDS];
+static int cfg_num_supply_rewards;
+static mobjtype_t cfg_cache_rewards[WOOD_MAX_REWARDS];
+static int cfg_num_cache_rewards;
+static mobjtype_t cfg_elite_rewards[WOOD_MAX_REWARDS];
+static int cfg_num_elite_rewards;
+static int cfg_elite_count = 2;       /* элитных полян на карту */
+static int cfg_elite_budget = 160;    /* бюджет элитной волны, % от обычной */
+static int cfg_elite_tier = 2;        /* элитная волна берёт врагов на столько волн «вперёд» */
+
+/* --- перки --- */
+typedef enum {
+  PK_SHARP_CHAIN, PK_SAP_DRINKER, PK_BLOOD_SAP, PK_BUCKSHOT, PK_HEAVY_LEAD,
+  PK_THICK_BARK, PK_DEEP_POCKETS, PK_LUMBERJACK, PK_BARK_ARMOR, PK_SECOND_WIND,
+  NUMPERKS
+} wood_perk_id_t;
+
+typedef struct {
+  const char *id;      /* имя в WOODCFG */
+  const char *name;    /* на карточке (шрифт Doom: только латиница) */
+  const char *desc;
+  int max_level;
+} wood_perk_t;
+
+static const wood_perk_t perk_info[NUMPERKS] = {
+  { "sharp_chain",  "SHARP CHAIN",  "CHAINSAW DEALS +100% DAMAGE",      2 },
+  { "sap_drinker",  "SAP DRINKER",  "CHAINSAW HITS HEAL 1 HP",          2 },
+  { "blood_sap",    "BLOOD SAP",    "EVERY KILL HEALS 4 HP",            3 },
+  { "buckshot",     "BUCKSHOT",     "SHOTGUNS DEAL +30% DAMAGE",        3 },
+  { "heavy_lead",   "HEAVY LEAD",   "ALL GUNS DEAL +15% DAMAGE",        3 },
+  { "thick_bark",   "THICK BARK",   "TAKE 15% LESS DAMAGE",             3 },
+  { "deep_pockets", "DEEP POCKETS", "DOUBLE AMMO CAPACITY + AMMO",      1 },
+  { "lumberjack",   "LUMBERJACK",   "TREES FALL FAST, DROP TWICE",      1 },
+  { "bark_armor",   "BARK ARMOR",   "+50 ARMOR RIGHT NOW",              3 },
+  { "second_wind",  "SECOND WIND",  "FULL HEALTH AFTER EVERY CLEARING", 1 },
+};
+
+#define WOOD_MAX_CHOICES 3
+static dboolean cfg_perk_enabled[NUMPERKS];
+static int cfg_num_perks;             /* 0 — перков нет (нет строки perks в WOODCFG) */
+static int perk_level[NUMPERKS];      /* взятые перки за этот забег */
+static int perk_picks;                /* сколько выборов ещё впереди (после элиты — два) */
+static dboolean choice_open;          /* открыт выбор — игра на паузе */
+static int choice[WOOD_MAX_CHOICES], num_choices, choice_sel;
+static int choice_tic;                /* gametic открытия: короткая пауза против случайного нажатия */
+#define WOOD_CHOICE_ARM (TICRATE / 2)
+static int last_kills;                /* для BLOOD SAP: сколько убийств было на прошлом тике */
+
+/* --- призраки наград у входов на тропы --- */
+#define WOOD_MAX_ICONS 96
+typedef struct {
+  mobj_t *mo;
+  int clearing;        /* чья это награда */
+  fixed_t z;           /* высота парения */
+} wood_icon_t;
+static wood_icon_t icons[WOOD_MAX_ICONS];
+static int num_icons;
+static int hint_icon = -1;            /* у какого призрака уже показали подсказку */
+
+static void Wood_Message(const char *msg, int color, int sfx);
 /* --- деревья-мимики --- */
 #define WOOD_MAX_MIMICS      96
 #define WOOD_MIMIC_SAFE      (384 * FRACUNIT)   /* у старта мимиков нет */
@@ -248,6 +330,9 @@ static void Wood_ParseConfig(int lump)
   cfg_num_calm = cfg_num_battle = 0;
   cfg_num_saw_trees = cfg_num_saw_drops = 0;
   cfg_saw_stump = NUMMOBJTYPES;
+  cfg_num_supply_rewards = cfg_num_cache_rewards = cfg_num_elite_rewards = 0;
+  cfg_num_perks = 0;
+  memset(cfg_perk_enabled, 0, sizeof(cfg_perk_enabled));
   cfg_num_mimic_drops = cfg_num_golden_drops = 0;
   cfg_mimic_chance = cfg_golden_chance = 0;
   cfg_golden_type = NUMMOBJTYPES;
@@ -329,6 +414,38 @@ static void Wood_ParseConfig(int lump)
       cfg_saw_stump = Wood_TypeForDoomednum(atoi(rest));
     else if (!strcmp(key, "saw_drop"))
       Wood_ParseTypeList(rest, cfg_saw_drops, &cfg_num_saw_drops, WOOD_MAX_REWARDS);
+    else if (!strcmp(key, "supply_reward"))
+      Wood_ParseTypeList(rest, cfg_supply_rewards, &cfg_num_supply_rewards, WOOD_MAX_REWARDS);
+    else if (!strcmp(key, "cache_reward"))
+      Wood_ParseTypeList(rest, cfg_cache_rewards, &cfg_num_cache_rewards, WOOD_MAX_REWARDS);
+    else if (!strcmp(key, "elite_reward"))
+      Wood_ParseTypeList(rest, cfg_elite_rewards, &cfg_num_elite_rewards, WOOD_MAX_REWARDS);
+    else if (!strcmp(key, "elite_count"))
+      cfg_elite_count = BETWEEN(0, WOOD_MAX_CLEARINGS, atoi(rest));
+    else if (!strcmp(key, "elite_budget"))
+      cfg_elite_budget = BETWEEN(100, 400, atoi(rest));
+    else if (!strcmp(key, "elite_tier"))
+      cfg_elite_tier = BETWEEN(0, 10, atoi(rest));
+    else if (!strcmp(key, "perks"))
+    {
+      char buf[256], *tok;
+      int k;
+      strncpy(buf, rest, sizeof(buf) - 1);
+      buf[sizeof(buf) - 1] = 0;
+      for (tok = strtok(buf, " \t\r"); tok; tok = strtok(NULL, " \t\r"))
+      {
+        for (k = 0; k < NUMPERKS; k++)
+          if (!strcmp(tok, perk_info[k].id))
+            break;
+        if (k == NUMPERKS)
+          lprintf(LO_WARN, "WOODCFG: unknown perk %s\n", tok);
+        else if (!cfg_perk_enabled[k])
+        {
+          cfg_perk_enabled[k] = true;
+          cfg_num_perks++;
+        }
+      }
+    }
     else if (!strcmp(key, "mimic_chance"))
       cfg_mimic_chance = BETWEEN(0, 100, atoi(rest));
     else if (!strcmp(key, "mimic_health"))
@@ -389,6 +506,404 @@ static void Wood_FindClearings(void)
     if (c->boss)
       boss_idx = num_clearings - 1;
   }
+}
+
+/* ------------------------------------------------------------------------ */
+/* Развилки: тип награды каждой поляны и «призраки» наград у входов на тропы */
+/* ------------------------------------------------------------------------ */
+
+static int Wood_ClearingOf(const sector_t *sec)
+{
+  int i;
+  for (i = 0; i < num_clearings; i++)
+    if (clearings[i].sector == sec)
+      return i;
+  return -1;
+}
+
+/* Раздаёт полянам типы наград. Оружия — столько, сколько его в списке, и в порядке силы
+ * от старта вглубь леса (теги полян идут по удалённости); ближайшая к старту — всегда оружие.
+ * Ещё elite_count элитных, остальные поровну припасы и тайники; порядок случайный. */
+static void Wood_AssignRoutes(void)
+{
+  int order[WOOD_MAX_CLEARINGS];
+  wood_route_t types[WOOD_MAX_CLEARINGS];
+  int n = 0, i, j, w, e, k = 0;
+
+  for (i = 0; i < num_clearings; i++)
+  {
+    clearings[i].route = ROUTE_NONE;
+    clearings[i].weapon = NUMMOBJTYPES;
+    if (clearings[i].boss)
+      continue;
+    for (j = n; j > 0 && clearings[order[j - 1]].sector->tag > clearings[i].sector->tag; j--)
+      order[j] = order[j - 1];
+    order[j] = i;
+    n++;
+  }
+  if (!n)
+    return;
+
+  w = MIN(cfg_num_weapons, n);
+  e = MIN(cfg_elite_count, n - w);
+  j = Wood_RandRange(0, 1);
+  for (i = 0; i < n; i++)
+    types[i] = i < w ? ROUTE_WEAPON : i < w + e ? ROUTE_ELITE :
+               ((i + j) & 1) ? ROUTE_CACHE : ROUTE_SUPPLY;
+  for (i = n - 1; i > 0; i--)
+  {
+    wood_route_t t;
+    j = Wood_RandRange(0, i);
+    t = types[i]; types[i] = types[j]; types[j] = t;
+  }
+  /* с одной пилой далеко не уйдёшь: первая поляна от старта даёт оружие */
+  if (w && types[0] != ROUTE_WEAPON)
+    for (i = 1; i < n; i++)
+      if (types[i] == ROUTE_WEAPON)
+      {
+        types[i] = types[0];
+        types[0] = ROUTE_WEAPON;
+        break;
+      }
+
+  for (i = 0; i < n; i++)
+  {
+    wood_clearing_t *c = &clearings[order[i]];
+    c->route = types[i];
+    if (types[i] == ROUTE_WEAPON)
+      c->weapon = cfg_weapons[k++];
+  }
+}
+
+/* Чем «призрак» выглядит: само оружие или первый предмет из списка наград. */
+static mobjtype_t Wood_RouteIcon(const wood_clearing_t *c)
+{
+  switch (c->route)
+  {
+    case ROUTE_WEAPON: return c->weapon;
+    case ROUTE_SUPPLY: return cfg_num_supply_rewards ? cfg_supply_rewards[0] : NUMMOBJTYPES;
+    case ROUTE_CACHE:  return cfg_num_cache_rewards ? cfg_cache_rewards[0] : NUMMOBJTYPES;
+    case ROUTE_ELITE:  return cfg_num_elite_rewards ? cfg_elite_rewards[0] : NUMMOBJTYPES;
+    default:           return NUMMOBJTYPES;
+  }
+}
+
+static const char *Wood_WeaponName(mobjtype_t t)
+{
+  switch (states[mobjinfo[t].spawnstate].sprite)
+  {
+    case SPR_CSAW: return "A CHAINSAW";
+    case SPR_SHOT: return "A SHOTGUN";
+    case SPR_MGUN: return "A CHAINGUN";
+    case SPR_SGN2: return "A SUPER SHOTGUN";
+    case SPR_LAUN: return "A ROCKET LAUNCHER";
+    case SPR_PLAS: return "A PLASMA GUN";
+    case SPR_BFUG: return "THE BFG";
+    default:       return "A NEW WEAPON";
+  }
+}
+
+static const char *Wood_RouteHint(const wood_clearing_t *c)
+{
+  static char buf[64];
+  switch (c->route)
+  {
+    case ROUTE_WEAPON:
+      sprintf(buf, "THIS WAY: %s", Wood_WeaponName(c->weapon));
+      return buf;
+    case ROUTE_SUPPLY: return "THIS WAY: MEDKITS AND ARMOR";
+    case ROUTE_CACHE:  return "THIS WAY: AMMO CACHE";
+    case ROUTE_ELITE:  return "THIS WAY: ELITE WAVE AND TREASURE";
+    default:           return NULL;
+  }
+}
+
+static void Wood_SpawnIcon(fixed_t x, fixed_t y, mobjtype_t type, int clearing)
+{
+  mobj_t *mo;
+  if (num_icons >= WOOD_MAX_ICONS)
+    return;
+  mo = P_SpawnMobj(x, y, ONFLOORZ, type);
+  /* только картинка: не подобрать, не считается в предметах, парит над тропой */
+  mo->flags &= ~(MF_SPECIAL | MF_COUNTITEM);
+  mo->flags |= MF_NOGRAVITY | MF_TRANSLUCENT;
+  icons[num_icons].mo = mo;
+  icons[num_icons].clearing = clearing;
+  icons[num_icons].z = mo->floorz + 40 * FRACUNIT;
+  mo->z = icons[num_icons].z;
+  num_icons++;
+}
+
+/* Тропа — сектор без тега ровно с двумя соседями, хотя бы один из которых поляна
+ * (старт тоже без тега, но его соседи — тропы). У каждого конца тропы вешаем призрак
+ * награды поляны на другом конце: стоя на развилке, видно, что ждёт на каждой тропе. */
+static void Wood_PlaceIcons(void)
+{
+  int s, l, k;
+  num_icons = 0;
+  hint_icon = -1;
+  for (s = 0; s < numsectors; s++)
+  {
+    sector_t *sec = &sectors[s], *nb[2] = { NULL, NULL };
+    int n = 0;
+    fixed_t pminx = INT_MAX, pminy = INT_MAX, pmaxx = INT_MIN, pmaxy = INT_MIN, pcx, pcy;
+
+    if (sec->tag)
+      continue;
+    for (l = 0; l < sec->linecount && n <= 2; l++)
+    {
+      line_t *ln = sec->lines[l];
+      sector_t *o;
+      pminx = MIN(pminx, MIN(ln->v1->x, ln->v2->x));
+      pmaxx = MAX(pmaxx, MAX(ln->v1->x, ln->v2->x));
+      pminy = MIN(pminy, MIN(ln->v1->y, ln->v2->y));
+      pmaxy = MAX(pmaxy, MAX(ln->v1->y, ln->v2->y));
+      if (!ln->backsector)
+        continue;
+      o = ln->frontsector == sec ? ln->backsector : ln->frontsector;
+      if (o == sec || o == nb[0] || o == nb[1])
+        continue;
+      if (n < 2)
+        nb[n] = o;
+      n++;
+    }
+    if (n != 2 || (Wood_ClearingOf(nb[0]) < 0 && Wood_ClearingOf(nb[1]) < 0))
+      continue;
+    pcx = pminx / 2 + pmaxx / 2;
+    pcy = pminy / 2 + pmaxy / 2;
+
+    for (k = 0; k < 2; k++)
+    {
+      int to = Wood_ClearingOf(nb[1 - k]);
+      fixed_t minx = INT_MAX, miny = INT_MAX, maxx = INT_MIN, maxy = INT_MIN, mx, my;
+      angle_t ang;
+      mobjtype_t type;
+
+      if (to < 0 || clearings[to].boss)
+        continue;
+      type = Wood_RouteIcon(&clearings[to]);
+      if (type == NUMMOBJTYPES)
+        continue;
+      /* середина общего края тропы и сектора nb[k] */
+      for (l = 0; l < sec->linecount; l++)
+      {
+        line_t *ln = sec->lines[l];
+        if (ln->backsector && (ln->frontsector == nb[k] || ln->backsector == nb[k]))
+        {
+          minx = MIN(minx, MIN(ln->v1->x, ln->v2->x));
+          maxx = MAX(maxx, MAX(ln->v1->x, ln->v2->x));
+          miny = MIN(miny, MIN(ln->v1->y, ln->v2->y));
+          maxy = MAX(maxy, MAX(ln->v1->y, ln->v2->y));
+        }
+      }
+      mx = minx / 2 + maxx / 2;
+      my = miny / 2 + maxy / 2;
+      ang = R_PointToAngle2(mx, my, pcx, pcy) >> ANGLETOFINESHIFT;
+      Wood_SpawnIcon(mx + 56 * finecosine[ang], my + 56 * finesine[ang], type, to);
+    }
+  }
+  lprintf(LO_INFO, "WOOD: %d route icons\n", num_icons);
+}
+
+/* Поляна зачищена — её призраки тают. */
+static void Wood_RemoveIcons(int clearing)
+{
+  int i;
+  for (i = 0; i < num_icons; i++)
+    if (icons[i].mo && icons[i].clearing == clearing)
+    {
+      P_SpawnMobj(icons[i].mo->x, icons[i].mo->y, icons[i].mo->z, MT_IFOG);
+      P_RemoveMobj(icons[i].mo);
+      icons[i].mo = NULL;
+    }
+}
+
+/* Призраки покачиваются; у ближайшего — подсказка, что там. */
+static void Wood_TickIcons(const mobj_t *pmo)
+{
+  int i, near = -1;
+  fixed_t best = 192 * FRACUNIT;
+  dboolean far_from_hint = true;
+
+  for (i = 0; i < num_icons; i++)
+  {
+    mobj_t *mo = icons[i].mo;
+    fixed_t d;
+    if (!mo)
+      continue;
+    mo->z = icons[i].z + 6 * finesine[((leveltime + i * 13) * 96) & FINEMASK];
+    mo->frame |= FF_FULLBRIGHT;   /* светится и в тёмной чаще; анимация кадра флаг сбрасывает */
+    /* вне боя призрак время от времени искрится — так его видно с середины поляны */
+    if (current < 0 && (leveltime + i * 17) % (2 * TICRATE) == 0)
+      P_SpawnMobj(mo->x, mo->y, mo->z, MT_IFOG);
+    d = P_AproxDistance(mo->x - pmo->x, mo->y - pmo->y);
+    if (d < best)
+    {
+      best = d;
+      near = i;
+    }
+    if (i == hint_icon && d < 384 * FRACUNIT)
+      far_from_hint = false;
+  }
+  if (current >= 0)
+    return;
+  if (near >= 0 && near != hint_icon)
+  {
+    const char *hint = Wood_RouteHint(&clearings[icons[near].clearing]);
+    hint_icon = near;
+    if (hint)
+      Wood_Message(hint, CR_GOLD, 0);
+  }
+  else if (near < 0 && far_from_hint)
+    hint_icon = -1;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Перки                                                                    */
+/* ------------------------------------------------------------------------ */
+
+static void Wood_OpenChoice(void)
+{
+  int pool[NUMPERKS], n = 0, i;
+  for (i = 0; i < NUMPERKS; i++)
+    if (cfg_perk_enabled[i] && perk_level[i] < perk_info[i].max_level)
+      pool[n++] = i;
+  if (!n)
+  {
+    perk_picks = 0;
+    return;
+  }
+  for (num_choices = 0; num_choices < WOOD_MAX_CHOICES && n > 0; num_choices++)
+  {
+    int k = Wood_RandRange(0, n - 1);
+    choice[num_choices] = pool[k];
+    pool[k] = pool[--n];
+  }
+  choice_sel = 0;
+  choice_open = true;
+  choice_tic = gametic;
+  S_StartSound(NULL, sfx_getpow);
+}
+
+static void Wood_Heal(player_t *p, int amount, int cap)
+{
+  if (p->health >= cap || amount <= 0)
+    return;
+  p->health = MIN(cap, p->health + amount);
+  if (p->mo)
+    p->mo->health = p->health;
+}
+
+static void Wood_TakePerk(int sel)
+{
+  player_t *p = &players[consoleplayer];
+  int k = choice[sel], i;
+  char msg[64];
+
+  perk_level[k]++;
+  switch (k)
+  {
+    case PK_DEEP_POCKETS:
+      if (!p->backpack)
+      {
+        for (i = 0; i < NUMAMMO; i++)
+          p->maxammo[i] *= 2;
+        p->backpack = true;
+      }
+      for (i = 0; i < NUMAMMO; i++)
+        p->ammo[i] = MIN(p->maxammo[i], p->ammo[i] + clipammo[i] * 2);
+      break;
+    case PK_BARK_ARMOR:
+      p->armorpoints = MIN(200, p->armorpoints + 50);
+      if (!p->armortype)
+        p->armortype = 1;
+      break;
+    default:
+      break;
+  }
+  lprintf(LO_INFO, "WOOD: perk %s level %d\n", perk_info[k].id, perk_level[k]);
+  if (perk_level[k] > 1)
+    sprintf(msg, "%s %d", perk_info[k].name, perk_level[k]);
+  else
+    strcpy(msg, perk_info[k].name);
+  Wood_Message(msg, CR_GOLD, sfx_itemup);
+  choice_open = false;
+  if (--perk_picks > 0)
+    Wood_OpenChoice();
+}
+
+int WOOD_Frozen(void)
+{
+  return wood_active && choice_open && gamestate == GS_LEVEL;
+}
+
+int WOOD_Responder(event_t *ev)
+{
+  dboolean armed;
+  if (!WOOD_Frozen() || menuactive)
+    return false;
+  armed = gametic - choice_tic >= WOOD_CHOICE_ARM;
+  if (ev->type == ev_keydown)
+  {
+    int key = ev->data1;
+    if (key >= '1' && key < '1' + num_choices)
+    {
+      if (armed)
+        Wood_TakePerk(key - '1');
+    }
+    else if (key == KEYD_UPARROW || key == KEYD_LEFTARROW || key == key_up ||
+             key == key_strafeleft || key == key_left)
+    {
+      choice_sel = (choice_sel + num_choices - 1) % num_choices;
+      S_StartSound(NULL, sfx_pstop);
+    }
+    else if (key == KEYD_DOWNARROW || key == KEYD_RIGHTARROW || key == key_down ||
+             key == key_straferight || key == key_right)
+    {
+      choice_sel = (choice_sel + 1) % num_choices;
+      S_StartSound(NULL, sfx_pstop);
+    }
+    else if (key == KEYD_ENTER || key == key_use || key == key_fire || key == key_menu_enter)
+    {
+      if (armed)
+        Wood_TakePerk(choice_sel);
+    }
+    return true;   /* остальные клавиши (оружие, движение) не уходят в игру */
+  }
+  if (ev->type == ev_mouse && (ev->data1 & 1))
+  {
+    if (armed)
+      Wood_TakePerk(choice_sel);
+    return true;
+  }
+  return false;
+}
+
+int WOOD_AdjustDamage(mobj_t *target, mobj_t *inflictor, mobj_t *source, int damage)
+{
+  if (!wood_active || damage <= 0 || damage >= 1000)
+    return damage;
+  if (source && source->player && target != source)
+  {
+    player_t *p = source->player;
+    int pct = 100;
+    if (inflictor == source && p->readyweapon == wp_chainsaw)
+    {
+      pct += 100 * perk_level[PK_SHARP_CHAIN];
+      Wood_Heal(p, perk_level[PK_SAP_DRINKER], 100);
+    }
+    else
+    {
+      pct += 15 * perk_level[PK_HEAVY_LEAD];
+      if (inflictor == source &&
+          (p->readyweapon == wp_shotgun || p->readyweapon == wp_supershotgun))
+        pct += 30 * perk_level[PK_BUCKSHOT];
+    }
+    damage = damage * pct / 100;
+  }
+  if (target->player && perk_level[PK_THICK_BARK])
+    damage = MAX(1, damage * (100 - 15 * perk_level[PK_THICK_BARK]) / 100);
+  return damage;
 }
 
 /* Случайный трек из списка, не повторяя предыдущий. */
@@ -563,6 +1078,7 @@ static void Wood_StartWave(int idx)
 {
   wood_clearing_t *c = &clearings[idx];
   int budget = cfg_budget_base + cfg_budget_step * waves_cleared;
+  int tier = waves_cleared;
   int guard = 0;
   dboolean boss_spawned = false;
   char msg[64];
@@ -577,6 +1093,11 @@ static void Wood_StartWave(int idx)
       boss_spawned = Wood_SpawnFoe(c, cfg_bosses[Wood_RandRange(0, cfg_num_bosses - 1)], true) != NULL;
     budget = budget * cfg_boss_escorts / 100;
   }
+  else if (c->route == ROUTE_ELITE)
+  {
+    budget = budget * cfg_elite_budget / 100;
+    tier += cfg_elite_tier;
+  }
 
   while (budget > 0 && wave_size < cfg_max_monsters && guard++ < 256)
   {
@@ -584,7 +1105,7 @@ static void Wood_StartWave(int idx)
     int candidates[WOOD_MAX_MONSTERS];
 
     for (i = 0; i < cfg_num_monsters; i++)
-      if (cfg_monsters[i].min_wave <= waves_cleared && cfg_monsters[i].cost <= budget)
+      if (cfg_monsters[i].min_wave <= tier && cfg_monsters[i].cost <= budget)
         candidates[choices++] = i;
     if (!choices)
       break;
@@ -602,13 +1123,17 @@ static void Wood_StartWave(int idx)
     return;
   }
 
-  lprintf(LO_INFO, "WOOD: wave %d at clearing %d%s, %d monsters\n",
-          waves_cleared + 1, idx + 1, c->boss ? " (boss)" : "", wave_size);
+  {
+    static const char *route_names[] = { "boss", "weapon", "supply", "cache", "elite" };
+    lprintf(LO_INFO, "WOOD: wave %d at clearing %d (%s), %d monsters\n",
+            waves_cleared + 1, idx + 1, route_names[c->route], wave_size);
+  }
   if (boss_spawned)
     Wood_Message("THE KEEPER OF THE WOOD AWAKES!", CR_RED, sfx_bossit);
   else
   {
-    sprintf(msg, "WAVE %d: %d FOES", waves_cleared + 1, wave_size);
+    sprintf(msg, "%sWAVE %d: %d FOES", c->route == ROUTE_ELITE ? "ELITE " : "",
+            waves_cleared + 1, wave_size);
     Wood_Message(msg, CR_RED, sfx_bossit);
   }
   Wood_BattleMusic();
@@ -620,11 +1145,25 @@ static void Wood_GiveRewards(const wood_clearing_t *c)
   fixed_t x, y;
   mobj_t *pmo = players[consoleplayer].mo;
 
-  /* оружие — в центр поляны, остальное — вокруг */
-  if (waves_cleared - 1 < cfg_num_weapons)
-    Wood_SpawnWithFog(c->cx, c->cy, cfg_weapons[waves_cleared - 1]);
+  const mobjtype_t *extra = NULL;
+  int num_extra = 0;
+
+  /* в центр поляны — оружие этой поляны или случайный ящик патронов, остальное — вокруг */
+  if (c->route == ROUTE_WEAPON && c->weapon != NUMMOBJTYPES)
+    Wood_SpawnWithFog(c->cx, c->cy, c->weapon);
   else if (cfg_num_ammo_rewards)
     Wood_SpawnWithFog(c->cx, c->cy, cfg_ammo_rewards[Wood_RandRange(0, cfg_num_ammo_rewards - 1)]);
+
+  switch (c->route)
+  {
+    case ROUTE_SUPPLY: extra = cfg_supply_rewards; num_extra = cfg_num_supply_rewards; break;
+    case ROUTE_CACHE:  extra = cfg_cache_rewards;  num_extra = cfg_num_cache_rewards;  break;
+    case ROUTE_ELITE:  extra = cfg_elite_rewards;  num_extra = cfg_num_elite_rewards;  break;
+    default: break;
+  }
+  for (i = 0; i < num_extra; i++)
+    if (Wood_PickSpot(c, pmo, 0, &x, &y))
+      Wood_SpawnWithFog(x, y, extra[i]);
 
   for (i = 0; i < cfg_num_rewards; i++)
     if (Wood_PickSpot(c, pmo, 0, &x, &y))
@@ -680,6 +1219,7 @@ static void Wood_EndWave(void)
   wave_size = 0;
   Wood_SetBarrier(&fence, c, false);
   c->cleared = true;
+  Wood_RemoveIcons(current);
   current = -1;
   waves_cleared++;
 
@@ -692,9 +1232,12 @@ static void Wood_EndWave(void)
   Wood_GiveRewards(c);
   Wood_CalmMusic();
   lprintf(LO_INFO, "WOOD: wave %d cleared\n", waves_cleared);
+  if (perk_level[PK_SECOND_WIND])
+    Wood_Heal(&players[consoleplayer], 100, 100);
 
+  /* элитные поляны — по желанию: логово ждёт только обычные */
   for (i = 0; i < num_clearings; i++)
-    if (!clearings[i].cleared && !clearings[i].boss)
+    if (!clearings[i].cleared && !clearings[i].boss && clearings[i].route != ROUTE_ELITE)
       left++;
 
   if (left)
@@ -703,9 +1246,24 @@ static void Wood_EndWave(void)
     Wood_Message(msg, CR_GREEN, sfx_getpow);
   }
   else if (boss_idx >= 0)
-    Wood_OpenGate(c);
+  {
+    if (gate.num_lines)
+      Wood_OpenGate(c);
+    else
+      Wood_Message("CLEARING CLEARED. THE HEART OF THE WOOD AWAITS", CR_GREEN, sfx_getpow);
+  }
   else
+  {
     Wood_Victory();   /* на карте нет логова — забег кончается на последней поляне */
+    return;
+  }
+
+  /* выбор перка; после элитной поляны — два подряд */
+  if (cfg_num_perks)
+  {
+    perk_picks = c->route == ROUTE_ELITE ? 2 : 1;
+    Wood_OpenChoice();
+  }
 }
 
 /* ------------------------------------------------------------------------ */
@@ -949,6 +1507,7 @@ static void Wood_FellTree(player_t *p, mobj_t *tree)
   wood_mimic_t *mimic = Wood_FindMimic(tree);
   dboolean golden = tree->type == cfg_golden_type;
   mobj_t *mo;
+  int k, drops = perk_level[PK_LUMBERJACK] ? 2 : 1;
 
   if (mimic)
   {
@@ -970,10 +1529,10 @@ static void Wood_FellTree(player_t *p, mobj_t *tree)
   if (cfg_saw_stump != NUMMOBJTYPES)
     P_SpawnMobj(x, y, ONFLOORZ, cfg_saw_stump);
 
-  if (drop != NUMMOBJTYPES)
+  for (k = 0; k < drops && drop != NUMMOBJTYPES; k++, drop = Wood_PickSawDrop(p))
   {
     /* патроны кладём между пнём и игроком, чтобы не застряли за стволом */
-    fixed_t back = 24 * FRACUNIT;
+    fixed_t back = (24 + 20 * k) * FRACUNIT;
     mo = P_SpawnMobj(x - FixedMul(back, finecosine[away >> ANGLETOFINESHIFT]),
                      y - FixedMul(back, finesine[away >> ANGLETOFINESHIFT]),
                      ONFLOORZ, drop);
@@ -1036,6 +1595,9 @@ dboolean WOOD_SawTree(player_t *p, angle_t angle, int damage)
                 pmo->z + 32 * FRACUNIT);
   }
 
+  damage *= 1 + perk_level[PK_SHARP_CHAIN];
+  if (perk_level[PK_LUMBERJACK])
+    damage *= 3;
   {
     wood_mimic_t *m = Wood_FindMimic(best);
     if (m)
@@ -1080,6 +1642,48 @@ int WOOD_DeathThink(player_t *player)
     return false;
   }
   return again_armed;
+}
+
+/* Карточки выбора перка поверх игры (координаты — экран 320x200). */
+#define WOOD_PAL_PANEL   0     /* чёрный */
+#define WOOD_PAL_EDGE    124   /* тёмно-зелёный */
+#define WOOD_PAL_ACTIVE  231   /* золотой */
+
+static void Wood_FillRect(int x, int y, int w, int h, byte color)
+{
+  V_GetWideRect(&x, &y, &w, &h, VPT_STRETCH);
+  V_FillRect(0, x, y, w, h, color);
+}
+
+static void Wood_WriteCentered(int y, const char *text, int cm)
+{
+  M_WriteText((320 - M_StringWidth(text)) / 2, y, text, cm);
+}
+
+static void Wood_DrawChoice(void)
+{
+  int i;
+  char buf[64];
+
+  Wood_FillRect(16, 22, 288, 36 * num_choices + 44, WOOD_PAL_PANEL);
+  Wood_WriteCentered(28, perk_picks > 1 ? "THE WOOD OFFERS TWO GIFTS" : "THE WOOD OFFERS A GIFT",
+                     CR_GREEN);
+  for (i = 0; i < num_choices; i++)
+  {
+    const wood_perk_t *pk = &perk_info[choice[i]];
+    int y = 44 + i * 36, next = perk_level[choice[i]] + 1;
+    dboolean sel = i == choice_sel;
+
+    Wood_FillRect(24, y, 272, 32, sel ? WOOD_PAL_ACTIVE : WOOD_PAL_EDGE);
+    Wood_FillRect(26, y + 2, 268, 28, WOOD_PAL_PANEL);
+    if (pk->max_level > 1)
+      sprintf(buf, "%d  %s  %d/%d", i + 1, pk->name, next, pk->max_level);
+    else
+      sprintf(buf, "%d  %s", i + 1, pk->name);
+    M_WriteText(34, y + 5, buf, sel ? CR_GOLD : CR_GRAY);
+    M_WriteText(46, y + 17, pk->desc, sel ? CR_DEFAULT : CR_BROWN);
+  }
+  Wood_WriteCentered(48 + num_choices * 36, "1-3 OR ARROWS, ENTER TO TAKE", CR_GRAY);
 }
 
 extern patchnum_t hu_font[HU_FONTSIZE];
@@ -1130,6 +1734,11 @@ void WOOD_Drawer(void)
   int again_h = 0, keys_h = 0, y, secs;
   char buf[32];
 
+  if (WOOD_Frozen() && !menuactive)
+  {
+    Wood_DrawChoice();
+    return;
+  }
   if (!wood_active || gamestate != GS_LEVEL || p->playerstate != PST_DEAD ||
       dead_tics < WOOD_AGAIN_DELAY || menuactive)
     return;
@@ -1197,6 +1806,13 @@ void WOOD_LevelStart(void)
   music_started = false;
   dead_tics = 0;
   again_armed = false;
+  memset(perk_level, 0, sizeof(perk_level));
+  perk_picks = 0;
+  choice_open = false;
+  last_kills = 0;
+  memset(icons, 0, sizeof(icons));
+  num_icons = 0;
+  hint_icon = -1;
   for (i = 0; i < WOOD_MAX_MIMICS; i++)
     mimics[i].mo = NULL;
   num_mimics = 0;
@@ -1211,6 +1827,8 @@ void WOOD_LevelStart(void)
   Wood_FindClearings();
   Wood_InitTrees();
   Wood_Seed();
+  Wood_AssignRoutes();
+  Wood_PlaceIcons();
   Wood_PlantSpecialTrees();
 
   if (playeringame[consoleplayer] && players[consoleplayer].mo)
@@ -1255,6 +1873,12 @@ void WOOD_Ticker(void)
       Wood_Message("SOMETHING GLITTERS IN THE WOOD...", CR_GOLD, 0);
   }
 
+  /* BLOOD SAP: каждое убийство лечит */
+  if (p->killcount > last_kills && perk_level[PK_BLOOD_SAP])
+    Wood_Heal(p, 4 * perk_level[PK_BLOOD_SAP] * (p->killcount - last_kills), 100);
+  last_kills = p->killcount;
+
+  Wood_TickIcons(p->mo);
   Wood_MimicThink(p);
 
   if (current >= 0)

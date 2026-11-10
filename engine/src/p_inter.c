@@ -55,6 +55,7 @@
 #endif
 #include "p_inter.h"
 #include "e6y.h"//e6y
+#include "wood_director.h"
 
 #define BONUSADD        6
 
@@ -896,6 +897,9 @@ void P_DamageMobj(mobj_t *target,mobj_t *inflictor, mobj_t *source, int damage)
   player = target->player;
   if (player && gameskill == sk_baby)
     damage >>= 1;   // take half damage in trainer mode
+
+  if (WOOD_Enabled())   // WOOD: перки меняют урон
+    damage = WOOD_AdjustDamage(target, inflictor, source, damage);
 
   // Some close combat weapons should not
   // inflict thrust and push the victim out of reach,

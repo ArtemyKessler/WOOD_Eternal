@@ -277,7 +277,8 @@ void P_Ticker (void)
      */
 
     if (paused || (menuactive && !demoplayback && !netgame &&
-                players[consoleplayer].viewz != 1))
+                players[consoleplayer].viewz != 1) ||
+        WOOD_Frozen())   // WOOD: выбор перка — мир стоит
     {
         P_ResetWalkcam();
         return;
