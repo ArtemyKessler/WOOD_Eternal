@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <ctype.h>
 
 #include "doomstat.h"
 #include "d_player.h"
@@ -124,7 +125,18 @@ static int boss_idx = -1;             /* индекс логова в clearings,
 static int waves_cleared;             /* всего зачисток за забег — ось сложности */
 static int victory_tics;              /* отсчёт до финального экрана после победы */
 static dboolean run_won;              /* забег выигран: финальный экран — наш */
-static int won_waves, won_kills, won_tics;
+static int trees_felled;              /* спилено деревьев за забег */
+
+/* Итоги забега: снимок в момент смерти или победы, чтобы цифры не менялись,
+ * пока игрок смотрит на экран итогов (время идёт, ракета в полёте ещё может убить). */
+typedef struct {
+  int tics;          /* время в лесу */
+  int kills;
+  int trees;
+  int cleared;       /* зачищено полян, включая логово */
+  int clearings;     /* всего полян на карте, включая логово */
+} wood_summary_t;
+static wood_summary_t summary;
 static unsigned int rng_state = 0;
 
 /* --- музыка --- */
@@ -555,15 +567,26 @@ static void Wood_GiveRewards(const wood_clearing_t *c)
       Wood_SpawnWithFog(x, y, cfg_rewards[i]);
 }
 
+/* Снимок итогов забега для экрана смерти и финального экрана. */
+static void Wood_TakeSummary(const player_t *p)
+{
+  int i;
+  summary.tics = leveltime;
+  summary.kills = p->killcount;
+  summary.trees = trees_felled;
+  summary.cleared = 0;
+  for (i = 0; i < num_clearings; i++)
+    if (clearings[i].cleared)
+      summary.cleared++;
+  summary.clearings = num_clearings;
+}
+
 /* Победа над боссом: короткая пауза, потом финальный экран (F_StartFinale → WOOD_VictoryText). */
 static void Wood_Victory(void)
 {
-  player_t *p = &players[consoleplayer];
   run_won = true;
   victory_tics = WOOD_VICTORY_DELAY;
-  won_waves = waves_cleared;
-  won_kills = p->killcount;
-  won_tics = leveltime;
+  Wood_TakeSummary(&players[consoleplayer]);
   lprintf(LO_INFO, "WOOD: run won after %d waves\n", waves_cleared);
   Wood_Message("THE WOOD FALLS SILENT", CR_GOLD, sfx_secret);
 }
@@ -699,6 +722,7 @@ static void Wood_FellTree(player_t *p, mobj_t *tree)
 
   S_StartSound(tree, sfx_bdcls);   /* глухой удар — дерево падает */
   P_RemoveMobj(tree);
+  trees_felled++;
   if (cfg_saw_stump != NUMMOBJTYPES)
     P_SpawnMobj(x, y, ONFLOORZ, cfg_saw_stump);
 
@@ -783,6 +807,8 @@ static dboolean again_armed;
 
 int WOOD_DeathThink(player_t *player)
 {
+  if (!dead_tics)
+    Wood_TakeSummary(player);
   if (dead_tics < WOOD_AGAIN_DELAY)
   {
     dead_tics++;
@@ -796,11 +822,53 @@ int WOOD_DeathThink(player_t *player)
   return again_armed;
 }
 
+extern patchnum_t hu_font[HU_FONTSIZE];
+
+/* Строка мелким шрифтом HUD с тенью; align: 0 — от x вправо, 1 — до x (выравнивание вправо). */
+static int Wood_TextWidth(const char *str)
+{
+  int w = 0, c;
+  for (; *str; str++)
+  {
+    c = toupper((unsigned char)*str) - HU_FONTSTART;
+    w += (c < 0 || c >= HU_FONTSIZE) ? 4 : hu_font[c].width;
+  }
+  return w;
+}
+
+static void Wood_Text(int x, int y, const char *str, int cm, int align)
+{
+  int c, pass;
+  const char *ch;
+  if (align)
+    x -= Wood_TextWidth(str);
+  for (pass = 0; pass < 2; pass++)
+  {
+    int cx = x + (pass ? 0 : 1), cy = y + (pass ? 0 : 1);
+    for (ch = str; *ch; ch++)
+    {
+      c = toupper((unsigned char)*ch) - HU_FONTSTART;
+      if (c < 0 || c >= HU_FONTSIZE)
+      {
+        cx += 4;
+        continue;
+      }
+      V_DrawNumPatch(cx, cy, 0, hu_font[c].lumpnum, pass ? cm : CR_BLACK,
+                     VPT_STRETCH | VPT_TRANS);
+      cx += hu_font[c].width;
+    }
+  }
+}
+
+/* Экран итогов забега поверх мёртвого игрока: «Again?», цифры забега, подсказка с клавишами. */
+#define WOOD_SUMMARY_LINE  11
+#define WOOD_SUMMARY_HALF  64     /* полуширина таблицы итогов */
 void WOOD_Drawer(void)
 {
   static int lump_again = -2, lump_keys = -2;
   player_t *p = &players[displayplayer];
-  int w;
+  int again_h = 0, keys_h = 0, y, secs;
+  char buf[32];
 
   if (!wood_active || gamestate != GS_LEVEL || p->playerstate != PST_DEAD ||
       dead_tics < WOOD_AGAIN_DELAY || menuactive)
@@ -811,16 +879,42 @@ void WOOD_Drawer(void)
     lump_keys = W_CheckNumForName("WAGAINK");
   }
   if (lump_again >= 0)
-  {
-    w = R_NumPatchWidth(lump_again);
-    V_DrawNumPatch((320 - w) / 2, 64, 0, lump_again, CR_DEFAULT, VPT_STRETCH);
-  }
+    again_h = R_NumPatchHeight(lump_again);
+  if (lump_keys >= 0)
+    keys_h = R_NumPatchHeight(lump_keys);
+
+  /* всё по центру области над строкой состояния (0..168) */
+  y = (168 - (again_h + 6 + 4 * WOOD_SUMMARY_LINE + 6 + keys_h)) / 2;
+  if (y < 2)
+    y = 2;
+
+  if (lump_again >= 0)
+    V_DrawNumPatch((320 - R_NumPatchWidth(lump_again)) / 2, y, 0, lump_again,
+                   CR_DEFAULT, VPT_STRETCH);
+  y += again_h + 6;
+
+  secs = summary.tics / TICRATE;
+  sprintf(buf, "%d:%02d", secs / 60, secs % 60);
+  Wood_Text(160 - WOOD_SUMMARY_HALF, y, "TIME", CR_TAN, 0);
+  Wood_Text(160 + WOOD_SUMMARY_HALF, y, buf, CR_GOLD, 1);
+  y += WOOD_SUMMARY_LINE;
+  sprintf(buf, "%d", summary.kills);
+  Wood_Text(160 - WOOD_SUMMARY_HALF, y, "FOES FELLED", CR_TAN, 0);
+  Wood_Text(160 + WOOD_SUMMARY_HALF, y, buf, CR_GOLD, 1);
+  y += WOOD_SUMMARY_LINE;
+  sprintf(buf, "%d", summary.trees);
+  Wood_Text(160 - WOOD_SUMMARY_HALF, y, "TREES CUT DOWN", CR_TAN, 0);
+  Wood_Text(160 + WOOD_SUMMARY_HALF, y, buf, CR_GOLD, 1);
+  y += WOOD_SUMMARY_LINE;
+  sprintf(buf, "%d/%d", summary.cleared, summary.clearings);
+  Wood_Text(160 - WOOD_SUMMARY_HALF, y, "CLEARINGS", CR_TAN, 0);
+  Wood_Text(160 + WOOD_SUMMARY_HALF, y, buf, CR_GOLD, 1);
+  y += WOOD_SUMMARY_LINE + 6;
+
   /* подсказка мигает: секунду видна, полсекунды нет */
   if (lump_keys >= 0 && (gametic % (TICRATE * 3 / 2)) < TICRATE)
-  {
-    w = R_NumPatchWidth(lump_keys);
-    V_DrawNumPatch((320 - w) / 2, 118, 0, lump_keys, CR_DEFAULT, VPT_STRETCH);
-  }
+    V_DrawNumPatch((320 - R_NumPatchWidth(lump_keys)) / 2, y, 0, lump_keys,
+                   CR_DEFAULT, VPT_STRETCH);
 }
 
 void WOOD_LevelStart(void)
@@ -838,6 +932,8 @@ void WOOD_LevelStart(void)
   waves_cleared = 0;
   victory_tics = 0;
   run_won = false;
+  trees_felled = 0;
+  memset(&summary, 0, sizeof(summary));
   music_started = false;
   dead_tics = 0;
   again_armed = false;
@@ -951,17 +1047,19 @@ int WOOD_RunWon(void)
 const char *WOOD_VictoryText(void)
 {
   static char text[512];
-  int secs = won_tics / TICRATE;
+  int secs = summary.tics / TICRATE;
   sprintf(text,
           "THE KEEPER OF THE WOOD HAS FALLEN.\n"
           "THE TREES GO QUIET... FOR NOW.\n"
           "\n"
-          "CLEARINGS TAMED: %d\n"
-          "FOES FELLED: %d\n"
           "TIME IN THE WOOD: %d:%02d\n"
+          "FOES FELLED: %d\n"
+          "TREES CUT DOWN: %d\n"
+          "CLEARINGS TAMED: %d/%d\n"
           "\n"
           "PRESS FIRE TO LEAVE THE FOREST.",
-          won_waves, won_kills, secs / 60, secs % 60);
+          secs / 60, secs % 60, summary.kills, summary.trees,
+          summary.cleared, summary.clearings);
   return text;
 }
 
