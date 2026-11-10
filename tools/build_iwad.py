@@ -40,11 +40,15 @@ KEEP_SPRITES = {
     "CLIP", "AMMO", "SHEL", "SBOX", "ROCK", "BROK", "CELL", "CELP", "BPAK",
     # здоровье и броня
     "STIM", "MEDI", "SOUL", "MEGA", "ARM1", "ARM2", "BON1", "BON2",
+    # редкий лут золотого дерева (golden_drop): берсерк, неуязвимость
+    "PSTR", "PINV",
     # лес и барьер
     "TRE1", "TRE2", "SMIT", "TRED",
     # лесной декор из make_decor.py (подменяет картинки неиспользуемых декораций Doom II):
     # валун, камень, большой и малый куст, трава, цветы, грибы
     "COL1", "COL2", "COL3", "COL4", "POB1", "POB2", "BRS1",
+    # золотое дерево (golden_tree, рисует make_decor.py)
+    "ELEC",
 }
 
 # Текстуры и флэты, нужные движку помимо карты.
