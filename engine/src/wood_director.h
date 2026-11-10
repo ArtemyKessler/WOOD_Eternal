@@ -28,7 +28,7 @@ void WOOD_EndRun(void);
 struct player_s;
 int WOOD_DeathThink(struct player_s *player);
 
-/* Рисует «Again?» поверх экрана, пока игрок мёртв. Вызывается из D_Display после HU_Drawer. */
+/* Рисует экран итогов забега («Again?», время, убийства, деревья, поляны), пока игрок мёртв. Вызывается из D_Display после HU_Drawer. */
 void WOOD_Drawer(void);
 
 /* Бензопила не задела врага: если перед игроком дерево из saw_trees, пилим его.
